@@ -39,12 +39,13 @@
     {
       "id": 4,
       "prompt": "我没有 API Key，怎么获取？",
-      "expected_output": "引导用户通过 register 命令注册账号，说明需要提供邮箱和密码，注册成功后设置 CLAWSHIRE_API_KEY 环境变量",
+      "expected_output": "引导用户登录控制台 https://clawshire.cn，在控制台完成认证后手动创建 API Key，然后设置 CLAWSHIRE_API_KEY 环境变量",
       "files": [],
       "expectations": [
-        "提示用户运行 register 子命令",
-        "告知需要设置 CLAWSHIRE_API_KEY 环境变量",
-        "不调用任何需要认证的 API"
+        "提示用户访问 https://clawshire.cn 控制台",
+        "说明需要登录后手动创建 API Key，不可通过 API 接口获取",
+        "告知设置 CLAWSHIRE_API_KEY 环境变量的方法",
+        "不调用任何 API 接口"
       ]
     },
     {

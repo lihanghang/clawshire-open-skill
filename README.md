@@ -8,15 +8,10 @@
 
 ### 1. 获取 API Key
 
-```bash
-python skills/clawshire-data-query/scripts/clawshire_client.py register \
-  --email user@example.com --password your_password
-```
-
-设置环境变量：
+登录控制台 https://clawshire.cn，认证后手动创建 API Key，然后设置环境变量：
 
 ```bash
-export CLAWSHIRE_API_KEY="meme_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export CLAWSHIRE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 ### 2. 查询今日公告

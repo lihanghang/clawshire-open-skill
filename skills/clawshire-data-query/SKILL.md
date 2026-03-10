@@ -67,18 +67,19 @@ Authorization: Bearer $CLAWSHIRE_API_KEY
 
 ---
 
-### 工作流 4：注册/登录获取 API Key
+### 工作流 4：获取 API Key
 
-适用场景：用户需要获取 API Key，或忘记 API Key。
+适用场景：用户需要获取 API Key。
 
 **步骤：**
-1. 询问用户邮箱和密码
-2. 若首次使用：调用 `POST /api/v1/auth/register`
-3. 若已有账号：调用 `POST /api/v1/auth/login`
-4. 将返回的 `api_key` 展示给用户，并提示设置环境变量：
+1. 引导用户登录控制台：`https://clawshire.cn`
+2. 在控制台完成登录认证后，手动创建 API Key
+3. 将控制台生成的 `api_key` 设置为环境变量：
    ```bash
-   export CLAWSHIRE_API_KEY="meme_xxxxxxxx"
+   export CLAWSHIRE_API_KEY="sk-xxxxxxxx"
    ```
+
+> API Key 必须在控制台登录后手动创建，不支持通过 API 接口注册或获取。
 
 ---
 

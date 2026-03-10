@@ -7,9 +7,10 @@ A 股上市公司公告提取结果查询工具
     python clawshire_client.py announcements --start-date 2026-03-10 --end-date 2026-03-10
     python clawshire_client.py stock 000001 --start-date 2026-03-01 --end-date 2026-03-10
     python clawshire_client.py met-link "http://www.szse.cn/api/..."
-    python clawshire_client.py register --email user@example.com --password xxx
-    python clawshire_client.py login --email user@example.com --password xxx
     python clawshire_client.py api-key-info
+
+获取 API Key：登录控制台 https://clawshire.cn 手动创建
+设置环境变量：export CLAWSHIRE_API_KEY="sk-xxxxxxxx"
 """
 
 import argparse
@@ -24,6 +25,7 @@ from datetime import date
 from typing import Any
 
 BASE_URL = "https://api.clawshire.cn"
+CONSOLE_URL = "https://clawshire.cn"
 DEFAULT_PAGE_SIZE = 20
 MAX_RETRIES = 3
 TIMEOUT = 30
@@ -79,14 +81,23 @@ def _request(
     sys.exit(1)
 
 
-def _get_api_key(args_key: str | None) -> str | None:
-    """从命令行参数或环境变量获取 API Key。"""
-    return args_key or os.environ.get("CLAWSHIRE_API_KEY")
+def _require_api_key(args_key: str | None) -> str:
+    """获取 API Key，未设置则退出并提示用户去控制台创建。"""
+    key = args_key or os.environ.get("CLAWSHIRE_API_KEY")
+    if not key:
+        print(
+            f"错误：未设置 CLAWSHIRE_API_KEY 环境变量。\n"
+            f"请登录控制台创建 API Key：{CONSOLE_URL}\n"
+            f"创建后执行：export CLAWSHIRE_API_KEY='sk-xxxxxxxx'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return key
 
 
 def cmd_announcements(args: argparse.Namespace) -> dict:
     """按日期范围查询公告提取结果。"""
-    api_key = _get_api_key(args.api_key)
+    api_key = _require_api_key(args.api_key)
     params: dict[str, Any] = {
         "start_date": args.start_date,
         "end_date": args.end_date,
@@ -100,7 +111,7 @@ def cmd_announcements(args: argparse.Namespace) -> dict:
 
 def cmd_stock_announcements(args: argparse.Namespace) -> dict:
     """查询指定证券代码的公告。"""
-    api_key = _get_api_key(args.api_key)
+    api_key = _require_api_key(args.api_key)
     params: dict[str, Any] = {
         "page": args.page,
         "page_size": args.page_size,
@@ -121,48 +132,23 @@ def cmd_stock_announcements(args: argparse.Namespace) -> dict:
 
 def cmd_met_link(args: argparse.Namespace) -> dict:
     """根据公告原文链接查询提取结果。"""
-    api_key = _get_api_key(args.api_key)
+    api_key = _require_api_key(args.api_key)
     params: dict[str, Any] = {"met_link": args.link}
     if args.infotype:
         params["infotype"] = args.infotype
     return _request("GET", "/api/v1/met_link", params=params, api_key=api_key)
 
 
-def cmd_register(args: argparse.Namespace) -> dict:
-    """注册账号，返回 API Key。"""
-    return _request(
-        "POST",
-        "/api/v1/auth/register",
-        body={"user_email": args.email, "password": args.password},
-    )
-
-
-def cmd_login(args: argparse.Namespace) -> dict:
-    """密码登录，返回 API Key。"""
-    return _request(
-        "POST",
-        "/api/v1/auth/login",
-        body={"user_email": args.email, "password": args.password},
-    )
-
-
 def cmd_api_key_info(args: argparse.Namespace) -> dict:
     """查看当前 API Key 信息（需认证）。"""
-    api_key = _get_api_key(args.api_key)
-    if not api_key:
-        print(
-            "错误：未设置 CLAWSHIRE_API_KEY 环境变量。\n"
-            "请先注册：python clawshire_client.py register --email <email> --password <pwd>\n"
-            "然后设置：export CLAWSHIRE_API_KEY='meme_xxxxxxxx'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    api_key = _require_api_key(args.api_key)
     return _request("GET", "/api/v1/api-key/info", api_key=api_key)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="ClawShire 公告数据 API 客户端",
+        epilog=f"获取 API Key：登录控制台 {CONSOLE_URL} 手动创建",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--api-key", help="API Key（默认读取 CLAWSHIRE_API_KEY 环境变量）")
@@ -191,16 +177,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_link.add_argument("link", help="公告原文 URL")
     p_link.add_argument("--infotype", default="", help="指定提取类别（可选）")
 
-    # register
-    p_reg = sub.add_parser("register", help="注册账号获取 API Key")
-    p_reg.add_argument("--email", required=True, help="注册邮箱")
-    p_reg.add_argument("--password", required=True, help="密码")
-
-    # login
-    p_login = sub.add_parser("login", help="登录获取 API Key")
-    p_login.add_argument("--email", required=True, help="登录邮箱")
-    p_login.add_argument("--password", required=True, help="密码")
-
     # api-key-info
     sub.add_parser("api-key-info", help="查看当前 API Key 信息")
 
@@ -211,8 +187,6 @@ COMMAND_MAP = {
     "announcements": cmd_announcements,
     "stock": cmd_stock_announcements,
     "met-link": cmd_met_link,
-    "register": cmd_register,
-    "login": cmd_login,
     "api-key-info": cmd_api_key_info,
 }
 
