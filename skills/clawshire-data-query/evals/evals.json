@@ -1,0 +1,63 @@
+{
+  "skill": "clawshire-data-query",
+  "version": "1.0.0",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "查询今天的所有公告提取结果",
+      "expected_output": "调用 GET /api/v1/announcements，start_date 和 end_date 均为今天日期，返回公告列表，包含公司名、证券代码、公告类型、日期和结构化提取内容",
+      "files": [],
+      "expectations": [
+        "调用 announcements 子命令，start-date 和 end-date 均为当天",
+        "输出包含 data.total、data.items 字段",
+        "每条结果展示 sec_name、sec_code、infotype、doc_date、extracted_info"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "查询平安银行（000001）最近一周的董事会决议公告",
+      "expected_output": "调用 GET /api/v1/stock/000001/announcements，infotype=董事会决议，start_date 为7天前，end_date 为今天，返回该公司董事会决议的提取结果列表",
+      "files": [],
+      "expectations": [
+        "调用 stock 子命令，sec_code=000001",
+        "参数包含 infotype=董事会决议",
+        "日期范围覆盖近7天",
+        "输出结构化提取的决议内容"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "我有一个公告链接 http://www.szse.cn/api/disc/info/query?id=123abc，帮我查一下提取结果",
+      "expected_output": "调用 GET /api/v1/met_link，met_link 参数为用户提供的链接，返回该公告的完整结构化提取信息",
+      "files": [],
+      "expectations": [
+        "调用 met-link 子命令",
+        "link 参数为用户提供的原始 URL",
+        "展示返回的 extracted_info 完整内容"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "我没有 API Key，怎么获取？",
+      "expected_output": "引导用户通过 register 命令注册账号，说明需要提供邮箱和密码，注册成功后设置 CLAWSHIRE_API_KEY 环境变量",
+      "files": [],
+      "expectations": [
+        "提示用户运行 register 子命令",
+        "告知需要设置 CLAWSHIRE_API_KEY 环境变量",
+        "不调用任何需要认证的 API"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "查询 2026 年 3 月 1 日到 3 月 10 日的人事变动公告，每页取 50 条",
+      "expected_output": "调用 GET /api/v1/announcements，start_date=2026-03-01，end_date=2026-03-10，infotype=人事变动，page_size=50",
+      "files": [],
+      "expectations": [
+        "调用 announcements 子命令",
+        "start_date=2026-03-01，end_date=2026-03-10",
+        "infotype=人事变动",
+        "page_size=50"
+      ]
+    }
+  ]
+}

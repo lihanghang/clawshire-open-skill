@@ -1,0 +1,14 @@
+{
+  "name": "clawshire-skills",
+  "version": "1.0.0",
+  "owner": "clawshire (hi@clawshire.cn)",
+  "description": "虾饵 ClawShire 公告数据查询技能集，支持 A 股上市公司公告提取结果检索与分析",
+  "plugins": [
+    {
+      "name": "clawshire-data-query",
+      "description": "虾饵公告数据查询，支持按日期/证券代码/公告链接检索 A 股上市公告结构化提取结果",
+      "path": "./skills/clawshire-data-query",
+      "strict": false
+    }
+  ]
+}
