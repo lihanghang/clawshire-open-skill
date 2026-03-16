@@ -1,0 +1,65 @@
+{
+  "skill": "clawshire-annual-report",
+  "version": "1.0.0",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "查询九典制药（833359）2024 年报",
+      "expected_output": "调用 GET /api/v1/stock/833359/announcements，infotype=年报，start_date=2025-01-01，end_date=2025-06-30，展示营收、利润等结构化字段",
+      "files": [],
+      "expectations": [
+        "调用 stock 子命令，sec_code=833359",
+        "固定 infotype=年报",
+        "日期范围覆盖 2025-01-01 ~ 2025-06-30（2024年报披露期）",
+        "展示 extracted_info 中的营收、利润、分红等字段"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "查询 2024 年北交所所有公司年报",
+      "expected_output": "调用 GET /api/v1/announcements，infotype=年报，start_date=2025-01-01，end_date=2025-06-30，返回北交所全市场年报列表",
+      "files": [],
+      "expectations": [
+        "调用 list 子命令",
+        "固定 infotype=年报",
+        "日期范围为 2025-01-01 ~ 2025-06-30",
+        "展示公司列表及关键财务字段"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "我有一个北交所年报链接 https://www.bse.cn/disclosure/2025/xxx，帮我查提取结果",
+      "expected_output": "调用 GET /api/v1/met_link，met_link 为用户提供链接，infotype=年报，返回完整提取内容",
+      "files": [],
+      "expectations": [
+        "调用 met-link 子命令",
+        "link 参数为用户提供的原始 URL",
+        "固定 infotype=年报",
+        "展示 extracted_info 全部字段"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "查询证券代码 430090 的最新年报",
+      "expected_output": "调用 GET /api/v1/stock/430090/announcements，infotype=年报，日期范围为当前年份前一年的披露期",
+      "files": [],
+      "expectations": [
+        "430090 以 4 开头，识别为北交所股票",
+        "调用 stock 子命令，sec_code=430090",
+        "固定 infotype=年报",
+        "合理推断年份，设置对应日期范围"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "帮我比较一下北交所几家医疗公司 2024 年的营收情况",
+      "expected_output": "调用 list 子命令查询 2024 年报，从结果中筛选医疗类公司，对比各公司营收字段并汇总展示",
+      "files": [],
+      "expectations": [
+        "调用 list 子命令，year=2024",
+        "从 extracted_info 中提取营收相关字段",
+        "按公司汇总对比，输出结构化比较表格"
+      ]
+    }
+  ]
+}
