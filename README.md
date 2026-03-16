@@ -8,7 +8,7 @@
 
 ### 1. 获取 API Key
 
-登录控制台 https://clawshire.cn，认证后手动创建 API Key，然后设置环境变量：
+登录 [ClawShire 控制台](https://clawshire.cn)，认证后手动创建 API Key，然后设置环境变量：
 
 ```bash
 export CLAWSHIRE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -36,7 +36,7 @@ python skills/clawshire-data-query/scripts/clawshire_client.py met-link \
 
 ## 项目结构
 
-```
+```text
 clawshire-open-skill/
 ├── .claude-plugin/
 │   └── marketplace.json          # Claude 插件市场配置
@@ -51,5 +51,5 @@ clawshire-open-skill/
 
 ## 技术支持
 
-- 官网：https://clawshire.cn
-- API 文档：https://api.clawshire.cn/docs
+- 官网：[clawshire.cn](https://clawshire.cn)
+- API 文档：[api.clawshire.cn/docs](https://api.clawshire.cn/docs)
