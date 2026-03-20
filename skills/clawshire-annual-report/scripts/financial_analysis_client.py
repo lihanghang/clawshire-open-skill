@@ -7,6 +7,7 @@
 用法：
     python financial_analysis_client.py analyze path/to/年报.pdf
     python financial_analysis_client.py analyze path/to/年报.pdf --lang en
+    python financial_analysis_client.py analyze path/to/年报.pdf --output html
     python financial_analysis_client.py rules
 
 前置条件：
@@ -21,6 +22,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,7 +135,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # 输出结果
-    _print_result(job, elapsed, args.lang)
+    if getattr(args, "output", None) == "html":
+        out_path = _default_html_name(pdf_path)
+        _export_html(job, elapsed, args.lang, out_path)
+        print(f"  已生成报告：{out_path}")
+    else:
+        _print_result(job, elapsed, args.lang)
 
 
 def _print_result(job: dict, elapsed: int, lang: str) -> None:
@@ -168,6 +175,194 @@ def _print_result(job: dict, elapsed: int, lang: str) -> None:
         print("\n  🟢 未发现高风险或中风险项")
 
     print("─" * W + "\n")
+
+
+def _default_html_name(pdf_path: Path) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(pdf_path.parent / f"{pdf_path.stem}_risk_{ts}.html")
+
+
+def _export_html(job: dict, elapsed: int, lang: str, out_path: str) -> None:
+    """将分析结果渲染为独立 HTML 报告。"""
+    overall = job.get("overall_risk_level", "unknown")
+    rules = job.get("rule_results", [])
+    name_key = "display_name_zh" if lang == "zh" else "display_name_en"
+    conclusion_key = "conclusion_zh" if lang == "zh" else "conclusion_en"
+
+    high = [r for r in rules if r.get("risk_level") == "high"]
+    medium = [r for r in rules if r.get("risk_level") == "medium"]
+    low = [r for r in rules if r.get("risk_level") == "low"]
+    na = [r for r in rules if not r.get("risk_level")]
+
+    risk_color = {"high": "#e53e3e", "medium": "#d97706", "low": "#16a34a"}.get(overall, "#6b7280")
+    risk_label = RISK_LABEL.get(overall, overall)
+    risk_emoji = RISK_EMOJI.get(overall, "⚪")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def rule_cards(rule_list: list, level: str) -> str:
+        if not rule_list:
+            return ""
+        color = {"high": "#fef2f2", "medium": "#fffbeb", "low": "#f0fdf4"}.get(level, "#f9fafb")
+        border = {"high": "#fca5a5", "medium": "#fcd34d", "low": "#86efac"}.get(level, "#e5e7eb")
+        badge_bg = {"high": "#e53e3e", "medium": "#d97706", "low": "#16a34a"}.get(level, "#6b7280")
+        label = {"high": "高风险", "medium": "中风险", "low": "低风险"}.get(level, "不适用")
+        cards = []
+        for r in rule_list:
+            name = r.get(name_key) or r.get("display_name_zh", "")
+            conclusion = r.get(conclusion_key) or r.get("conclusion_zh", "")
+            category = r.get("rule_category", "")
+            evidence_list = r.get("evidence", [])
+            evidence_html = ""
+            if evidence_list:
+                items = "".join(f"<li>{e}</li>" for e in evidence_list)
+                evidence_html = f'<ul class="evidence">{items}</ul>'
+            cards.append(f"""
+            <div class="rule-card" style="background:{color};border-color:{border}">
+              <div class="rule-header">
+                <span class="rule-name">{name}</span>
+                <span class="badge" style="background:{badge_bg}">{label}</span>
+                {"<span class='category'>" + category + "</span>" if category else ""}
+              </div>
+              {"<p class='conclusion'>" + conclusion + "</p>" if conclusion else ""}
+              {evidence_html}
+            </div>""")
+        return "\n".join(cards)
+
+    sections = ""
+    if high:
+        sections += f"""
+        <section>
+          <h2 class="section-title high">🔴 高风险项（{len(high)} 条）</h2>
+          {rule_cards(high, "high")}
+        </section>"""
+    if medium:
+        sections += f"""
+        <section>
+          <h2 class="section-title medium">🟡 中风险项（{len(medium)} 条）</h2>
+          {rule_cards(medium, "medium")}
+        </section>"""
+    if low:
+        sections += f"""
+        <section>
+          <h2 class="section-title low">🟢 低风险项（{len(low)} 条）</h2>
+          {rule_cards(low, "low")}
+        </section>"""
+    if not high and not medium:
+        sections += """
+        <section>
+          <div class="no-risk">🟢 未发现高风险或中风险项</div>
+        </section>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>财务风险分析报告</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+           background: #f1f5f9; color: #1e293b; line-height: 1.6; }}
+    .container {{ max-width: 900px; margin: 32px auto; padding: 0 16px 64px; }}
+
+    /* 顶部摘要卡 */
+    .summary {{ background: #fff; border-radius: 16px; padding: 32px;
+               box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 32px; }}
+    .summary-header {{ display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }}
+    .risk-badge {{ font-size: 2rem; font-weight: 700; color: {risk_color};
+                  padding: 8px 20px; border: 3px solid {risk_color};
+                  border-radius: 12px; white-space: nowrap; }}
+    .summary-title h1 {{ font-size: 1.4rem; font-weight: 600; color: #0f172a; }}
+    .summary-title p {{ font-size: 0.85rem; color: #64748b; margin-top: 4px; }}
+    .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }}
+    .stat {{ background: #f8fafc; border-radius: 10px; padding: 14px 16px; text-align: center; }}
+    .stat-num {{ font-size: 1.6rem; font-weight: 700; }}
+    .stat-label {{ font-size: 0.75rem; color: #64748b; margin-top: 2px; }}
+    .stat.red .stat-num {{ color: #e53e3e; }}
+    .stat.yellow .stat-num {{ color: #d97706; }}
+    .stat.green .stat-num {{ color: #16a34a; }}
+    .stat.gray .stat-num {{ color: #6b7280; }}
+    .meta {{ margin-top: 20px; font-size: 0.8rem; color: #94a3b8;
+             display: flex; gap: 24px; flex-wrap: wrap; }}
+
+    /* 规则区块 */
+    section {{ margin-bottom: 28px; }}
+    .section-title {{ font-size: 1.05rem; font-weight: 600; margin-bottom: 14px; padding-bottom: 8px;
+                      border-bottom: 2px solid #e2e8f0; }}
+    .section-title.high {{ color: #e53e3e; border-color: #fca5a5; }}
+    .section-title.medium {{ color: #d97706; border-color: #fcd34d; }}
+    .section-title.low {{ color: #16a34a; border-color: #86efac; }}
+
+    /* 规则卡片 */
+    .rule-card {{ border: 1px solid; border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }}
+    .rule-header {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }}
+    .rule-name {{ font-weight: 600; font-size: 0.95rem; }}
+    .badge {{ font-size: 0.7rem; font-weight: 600; color: #fff;
+              padding: 2px 8px; border-radius: 20px; white-space: nowrap; }}
+    .category {{ font-size: 0.75rem; color: #64748b; background: #f1f5f9;
+                 padding: 2px 8px; border-radius: 20px; }}
+    .conclusion {{ font-size: 0.875rem; color: #374151; margin-top: 4px; }}
+    .evidence {{ margin-top: 10px; padding-left: 18px; font-size: 0.8rem; color: #64748b; }}
+    .evidence li {{ margin-bottom: 4px; }}
+    .no-risk {{ background: #f0fdf4; border: 1px solid #86efac; border-radius: 10px;
+                padding: 20px; text-align: center; font-size: 1rem;
+                color: #16a34a; font-weight: 500; }}
+
+    /* 页脚 */
+    .footer {{ text-align: center; font-size: 0.75rem; color: #94a3b8; margin-top: 48px; }}
+    .footer a {{ color: #94a3b8; }}
+
+    @media (max-width: 600px) {{
+      .stats {{ grid-template-columns: repeat(2, 1fr); }}
+      .summary-header {{ flex-direction: column; align-items: flex-start; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="summary">
+      <div class="summary-header">
+        <div class="risk-badge">{risk_emoji} {risk_label}</div>
+        <div class="summary-title">
+          <h1>财务风险分析报告</h1>
+          <p>由 ClawShire 财务分析引擎生成 · {generated_at}</p>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="stat red">
+          <div class="stat-num">{len(high)}</div>
+          <div class="stat-label">高风险</div>
+        </div>
+        <div class="stat yellow">
+          <div class="stat-num">{len(medium)}</div>
+          <div class="stat-label">中风险</div>
+        </div>
+        <div class="stat green">
+          <div class="stat-num">{len(low)}</div>
+          <div class="stat-label">低风险</div>
+        </div>
+        <div class="stat gray">
+          <div class="stat-num">{len(na)}</div>
+          <div class="stat-label">不适用</div>
+        </div>
+      </div>
+      <div class="meta">
+        <span>共分析 {len(rules)} 条规则</span>
+        <span>耗时 {elapsed // 60} 分 {elapsed % 60} 秒</span>
+      </div>
+    </div>
+
+    {sections}
+
+    <div class="footer">
+      <p>报告由 <a href="https://clawshire.cn">ClawShire</a> 生成，仅供参考，不构成投资建议。</p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
 
 
 def cmd_rules(args: argparse.Namespace) -> None:
@@ -211,6 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze = sub.add_parser("analyze", help="上传 PDF 并分析风险")
     p_analyze.add_argument("pdf", help="PDF 文件路径")
     p_analyze.add_argument("--lang", choices=["zh", "en"], default="zh", help="报告语言（默认 zh）")
+    p_analyze.add_argument("--output", choices=["html"], default=None, help="导出格式（html）")
 
     # rules
     sub.add_parser("rules", help="列出所有分析规则")

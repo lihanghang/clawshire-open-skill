@@ -56,11 +56,14 @@ python skills/clawshire-annual-report/scripts/clawshire_annual_client.py list --
 ### 6. 年报财务风险分析
 
 ```bash
-# 上传年报 PDF，输出风险评级（低/中/高）和高风险规则列表
-python skills/clawshire-annual-report/scripts/financial_analysis_client.py analyze path/to/年报.pdf
+# 终端输出风险摘要
+python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf
+
+# 导出 HTML 报告（自动保存到 PDF 同目录）
+python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf --output html
 
 # 查看所有分析规则
-python skills/clawshire-annual-report/scripts/financial_analysis_client.py rules
+python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py rules
 ```
 
 ## 项目结构

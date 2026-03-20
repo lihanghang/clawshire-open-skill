@@ -73,10 +73,14 @@ Authorization: Bearer $CLAWSHIRE_API_KEY
 **使用脚本：**
 
 ```bash
+# 终端输出风险摘要
 python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf
 
+# 导出 HTML 报告（自动命名，保存到同目录）
+python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf --output html
+
 # 英文报告
-python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/report.pdf --lang en
+python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/report.pdf --lang en --output html
 ```
 
 ---
