@@ -7,7 +7,8 @@
 | 技能 | 说明 | 数据范围 |
 | --- | --- | --- |
 | `clawshire-data-query` | 公告提取结果查询 | A 股全市场（沪深北） |
-| `clawshire-annual-report` | 年报结构化数据查询 + 财务风险分析 | 北交所上市公司 |
+| `clawshire-annual-report` | 年报结构化数据查询（含 CSV/Excel 导出） | 北交所上市公司 |
+| `clawshire-financial-analysis` | 年报 PDF 财务风险分析（25+ 条规则） | 通用（任意上市公司） |
 
 ## 快速开始
 
@@ -75,10 +76,13 @@ clawshire-open-skill/
 │   │   │   └── clawshire_client.py         # Python CLI 客户端
 │   │   └── evals/
 │   │       └── evals.json                  # 评测用例
-│   └── clawshire-annual-report/            # 北交所年报技能
+│   ├── clawshire-annual-report/            # 北交所年报技能
+│   │   ├── SKILL.md                        # 技能描述与工作流
+│   │   └── scripts/
+│   │       └── clawshire_annual_client.py  # 年报查询 CLI（支持 CSV/Excel 导出）
+│   └── clawshire-financial-analysis/       # 财务风险分析技能
 │       ├── SKILL.md                        # 技能描述与工作流
 │       └── scripts/
-│           ├── clawshire_annual_client.py  # 年报查询 CLI（支持 CSV/Excel 导出）
 │           └── financial_analysis_client.py# 财务风险分析 CLI
 └── README.md
 ```
