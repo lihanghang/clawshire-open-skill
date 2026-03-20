@@ -97,6 +97,50 @@ Authorization: Bearer $CLAWSHIRE_API_KEY
 
 ---
 
+### 工作流 5：财务风险分析（需认证）
+
+适用场景：用户需要对上市公司年报进行深度风险评估。调用 25+ 条分析规则，输出整体风险评级（低/中/高）和各规则详细分析。
+
+**前置条件：**
+- 需要有效的 `CLAWSHIRE_API_KEY`
+- 财务分析 API 需要在控制台开通权限（即将支持）
+
+**步骤：**
+1. 获取目标公司的年报 PDF 文件路径（或下载年报 URL 对应的 PDF）
+2. 调用 `POST /api/v1/financial-analysis/jobs` 上传 PDF
+3. 用返回的 `job_id` 轮询 `GET /api/v1/financial-analysis/jobs/{job_id}`
+4. 分析完成后，展示风险评级和高/中风险规则列表
+
+**注意：**
+- 财务分析 API 托管于 `https://api.clawshire.cn`，与公告数据 API 共享认证
+- 分析通常耗时 2-8 分钟，PDF 最大 100MB
+- 查看所有可用规则：`GET /api/v1/financial-analysis/rules`
+
+**示例：**
+```
+上传年报 PDF 进行风险分析
+→ POST /api/v1/financial-analysis/jobs (file=年报.pdf)
+← {"id": "job_xxxxx", "status": "pending", ...}
+
+轮询获取结果
+→ GET /api/v1/financial-analysis/jobs/job_xxxxx
+← {"status": "completed", "overall_risk_level": "medium", "rule_results": [...]}
+```
+
+**使用脚本：**
+```bash
+# 分析 PDF 文件（需要 CLAWSHIRE_API_KEY）
+python scripts/financial_analysis_client.py analyze path/to/年报.pdf
+
+# 或指定语言（默认中文）
+python scripts/financial_analysis_client.py analyze path/to/年报.pdf --lang en
+
+# 查看所有分析规则
+python scripts/financial_analysis_client.py rules
+```
+
+---
+
 ## 结果展示规范
 
 每条年报结果优先展示以下字段（若存在）：
@@ -110,6 +154,36 @@ Authorization: Bearer $CLAWSHIRE_API_KEY
 - **原文链接**：`met_link`
 
 `extracted_info` 中的所有字段均应完整展示，不做裁剪。
+
+---
+
+## 表格输出规范
+
+当用户要求「导出 CSV」「生成 Excel」「输出表格」时：
+
+1. 调用 API 获取数据（同上述工作流）
+2. 将每条年报的 `extracted_info` 字段**扁平化**为一行：
+   - 固定列：`证券代码`、`公司名称`、`公告标题`、`公告日期`、`原文链接`
+   - 动态列：`extracted_info` 中所有 key（跨条目取并集，缺失填空）
+3. 使用 `clawshire_annual_client.py --output csv` 或 `--output excel` 参数直接生成文件
+4. 告知用户文件保存路径
+
+**示例指令：**
+```bash
+# 输出 CSV
+python clawshire_annual_client.py list --year 2024 --output csv
+
+# 输出 Excel（需要 openpyxl）
+python clawshire_annual_client.py list --year 2024 --output excel
+
+# 单公司年报导出
+python clawshire_annual_client.py stock 833359 --output excel
+```
+
+**字段扁平化规则：**
+- `extracted_info` 为列表时，取第一条（主要提取结果）
+- 嵌套字典展开为 `父key_子key` 格式
+- 数值保留原始字符串，不做单位转换
 
 ---
 
