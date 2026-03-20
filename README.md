@@ -94,3 +94,22 @@ clawshire-open-skill/
 
 - 官网：[clawshire.cn](https://clawshire.cn)
 - API 文档：[clawshire.cn/api-docs](https://clawshire.cn/api-docs)
+
+## 更新技能
+
+如需更新到最新版本：
+
+```bash
+# 方式 1：如果你使用 git clone 的本地仓库
+cd <clone 目录>
+git pull
+
+# 方式 2：如果你通过 npx 安装
+npx <package-name> update
+
+# 或重新安装
+npm uninstall <package-name> -g
+npx <package-name>
+```
+
+> 建议关注 [GitHub Releases](https://github.com/lihanghang/clawshire-open-skill/releases) 了解更新内容。
