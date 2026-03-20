@@ -86,4 +86,4 @@ clawshire-open-skill/
 ## 技术支持
 
 - 官网：[clawshire.cn](https://clawshire.cn)
-- API 文档：[api.clawshire.cn/docs](https://api.clawshire.cn/docs)
+- API 文档：[clawshire.cn/api-docs](https://clawshire.cn/api-docs)

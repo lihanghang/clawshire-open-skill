@@ -15,7 +15,7 @@ A 股上市公司公告提取结果查询服务。支持按日期范围、证券
 
 在执行任何 API 调用前，必须检查 `CLAWSHIRE_API_KEY` 环境变量是否存在。
 - 只判断是否存在，**不得**在输出中明文显示 key 内容
-- 若不存在，引导用户注册获取：`https://api.clawshire.cn/docs`
+- 若不存在，引导用户注册获取：`https://clawshire.cn/api-docs`
 
 ---
 
