@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,16 @@ def headers() -> dict[str, str]:
 
 def _print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _save_json(data: Any, out: str, label: str = "结果") -> None:
+    """将 data 写入 JSON 文件，out 为空时自动生成文件名。"""
+    if not out:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = f"{label}_{ts}.json"
+    path = Path(out)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  已保存到: {path}", file=sys.stderr)
 
 
 def _fetch_session_schema(client: httpx.Client, session_id: int) -> dict | None:
@@ -314,7 +325,10 @@ def cmd_extract(args: argparse.Namespace) -> None:
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
         sys.exit(1)
-    _print_json(r.json())
+    data = r.json()
+    _print_json(data)
+    if args.out is not None:
+        _save_json(data, args.out, label=f"extract_session{args.session_id}")
 
 
 def cmd_batch_chat(args: argparse.Namespace) -> None:
@@ -329,7 +343,10 @@ def cmd_batch_chat(args: argparse.Namespace) -> None:
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
         sys.exit(1)
-    _print_json(r.json())
+    data = r.json()
+    _print_json(data)
+    if args.out is not None:
+        _save_json(data, args.out, label=f"batch{bid}_chat")
 
 
 def cmd_batch_end(args: argparse.Namespace) -> None:
@@ -394,11 +411,15 @@ def main() -> None:
     sp = sub.add_parser("extract", help="执行提取")
     sp.add_argument("--session-id", required=True)
     sp.add_argument("--doc-ids", required=True, help="逗号分隔 document_id")
+    sp.add_argument("--out", nargs="?", const="", default=None,
+                    help="保存结果 JSON（不指定路径时自动命名）")
     sp.set_defaults(func=cmd_extract)
 
     sp = sub.add_parser("batch-chat", help="批次修正一轮")
     sp.add_argument("batch_id", help="batch_id")
     sp.add_argument("message", help="修正说明")
+    sp.add_argument("--out", nargs="?", const="", default=None,
+                    help="保存修正结果 JSON（不指定路径时自动命名）")
     sp.set_defaults(func=cmd_batch_chat)
 
     sp = sub.add_parser("batch-end", help="结束批次")

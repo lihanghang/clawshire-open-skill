@@ -186,8 +186,17 @@ python clawshire_doc_extract_client.py session-create \
 ### 步骤 5：执行提取
 
 ```bash
+# 提取并打印到终端
 python clawshire_doc_extract_client.py extract \
   --session-id 1 --doc-ids "uuid1"
+
+# 提取并自动保存为 JSON（文件名自动生成）
+python clawshire_doc_extract_client.py extract \
+  --session-id 1 --doc-ids "uuid1" --out
+
+# 提取并保存到指定文件
+python clawshire_doc_extract_client.py extract \
+  --session-id 1 --doc-ids "uuid1" --out result.json
 ```
 
 > **耗时提示：** 此步骤通常需要 1～5 分钟，请告知用户等待。
@@ -197,7 +206,11 @@ python clawshire_doc_extract_client.py extract \
 ### 步骤 6：迭代修正（可选）
 
 ```bash
-python clawshire_doc_extract_client.py batch-chat 2 "把金额统一成数字，去掉货币符号"
+# 修正并自动保存结果
+python clawshire_doc_extract_client.py batch-chat 2 "把金额统一成数字，去掉货币符号" --out
+
+# 修正并保存到指定文件
+python clawshire_doc_extract_client.py batch-chat 2 "补充遗漏的乙方地址" --out fixed.json
 ```
 
 可重复多轮，每轮返回修正后的完整 `results`。
