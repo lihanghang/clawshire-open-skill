@@ -1,0 +1,62 @@
+{
+  "skill": "clawshire-doc-extract-engine",
+  "version": "1.0.0",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我有一份合同 PDF，想提取甲乙方和金额，该怎么做",
+      "expected_output": "说明先 upload，再 schema-conversations + 多轮 chat 描述字段，再 session-create、extract，必要时 batch-chat 修正",
+      "files": [],
+      "expectations": [
+        "使用 /api/v1/doc-extract-engine 而非 met_uuid",
+        "不依赖公告查询接口完成提取主流程"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "上传这两个 PDF 并开始设计提取 schema",
+      "expected_output": "POST upload 再 POST schema-conversations，document_ids 来自上传响应",
+      "files": [],
+      "expectations": [
+        "multipart 字段名为 files",
+        "document_ids 从上传结果读取"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "提取财务总监辞职暨聘任公告中的辞职人姓名、职务、辞职原因，以及新任命人的姓名、职务、任命信息",
+      "expected_output": "完整走通 upload → schema-create → schema-chat → session-create → extract 流程，结果包含辞职人和任命人的结构化字段",
+      "files": ["022_关于财务总监辞职暨聘任财务总监的公告_doc.pdf"],
+      "expectations": [
+        "schema 包含 resignation_info 和 appointment_info 两个对象",
+        "resignation_info 含 name、position、resignation_reason 必填字段",
+        "appointment_info 含 name、position、appointment_date 必填字段",
+        "schema-chat 返回的 schema 字段需保存为 JSON 文件后传给 session-create",
+        "提取结果 resignation_info.name 为李国政",
+        "提取结果 appointment_info.name 为汪周波",
+        "提取结果 appointment_info.appointment_date 为 2017年9月5日"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "schema-chat 之后怎么创建 session？schema 从哪里来",
+      "expected_output": "说明 schema-chat 返回 JSON 中的 schema 字段需手动保存为 schema.json 文件，再用 --schema-file 参数传给 session-create",
+      "files": [],
+      "expectations": [
+        "明确说明 schema 需从 schema-chat 响应的 schema 字段提取",
+        "说明需保存为本地 JSON 文件",
+        "给出 session-create --schema-file 的完整命令示例"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "本地测试时一直返回 401，API Key 是 sk_5c2d... 这种格式",
+      "expected_output": "说明本地环境 key 格式为 sk_（下划线），生产为 sk-（短横线），同时确认 CLAWSHIRE_API_BASE_URL 已指向本地地址",
+      "files": [],
+      "expectations": [
+        "区分本地 sk_ 和生产 sk- 两种格式",
+        "提示检查 CLAWSHIRE_API_BASE_URL 是否已设置为本地地址"
+      ]
+    }
+  ]
+}
