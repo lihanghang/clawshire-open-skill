@@ -2,7 +2,7 @@
   "name": "clawshire-skills",
   "version": "1.0.0",
   "owner": "clawshire (hi@clawshire.cn)",
-  "description": "虾饵 ClawShire 公告数据查询技能集，支持 A 股上市公司公告提取结果检索与分析",
+  "description": "虾饵 ClawShire 公告数据查询技能集，支持 A 股上市公司公告提取结果检索、分析与反思引擎质量评分",
   "plugins": [
     {
       "name": "clawshire-data-query",
@@ -20,6 +20,12 @@
       "name": "clawshire-financial-analysis",
       "description": "上市公司年报财务风险分析，上传 PDF 后调用 25+ 条规则输出整体风险评级（低/中/高）及各规则详细结论",
       "path": "./skills/clawshire-financial-analysis",
+      "strict": false
+    },
+    {
+      "name": "clawshire-doc-extract-engine",
+      "description": "通用文档提取，用户上传 PDF 后自然语言设计 Schema、结构化提取与多轮修正，对接 /api/v1/doc-extract-engine",
+      "path": "./skills/clawshire-doc-extract-engine",
       "strict": false
     }
   ]

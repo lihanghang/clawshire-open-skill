@@ -9,6 +9,7 @@
 | `clawshire-data-query` | 公告提取结果查询 | A 股全市场（沪深北） |
 | `clawshire-annual-report` | 年报结构化数据查询（含 CSV/Excel 导出） | 北交所上市公司 |
 | `clawshire-financial-analysis` | 年报 PDF 财务风险分析（25+ 条规则） | 通用（任意上市公司） |
+| `clawshire-doc-extract-engine` | 通用 PDF 提取（Schema 对话 + 提取 + 迭代修正） | 用户自备 PDF（需平台开启文档提取插件） |
 
 ## 快速开始
 
@@ -66,6 +67,26 @@ python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py 
 python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py rules
 ```
 
+### 7. 通用文档提取（PDF + Schema 对话 + 迭代）
+
+需平台已启用文档提取插件；依赖 `httpx`：`pip install httpx`。
+
+```bash
+# 上传 PDF（可多文件）
+python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py upload ./a.pdf ./b.pdf
+
+# 创建 Schema 对话并对话一轮（doc_ids 来自上传响应）
+python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py schema-create --doc-ids "id1,id2"
+python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py schema-chat 1 "提取标题、签署日期、金额"
+
+# 创建 Session、执行提取（schema 可先保存为 schema.json）
+python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py session-create \
+  --name "任务1" --schema-file schema.json --doc-ids "id1,id2"
+python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py extract --session-id 1 --doc-ids "id1,id2"
+```
+
+本地调试：`export CLAWSHIRE_API_BASE_URL="http://localhost:8452"`。
+
 ## 项目结构
 
 ```text
@@ -83,10 +104,16 @@ clawshire-open-skill/
 │   │   ├── SKILL.md                        # 技能描述与工作流
 │   │   └── scripts/
 │   │       └── clawshire_annual_client.py  # 年报查询 CLI（支持 CSV/Excel 导出）
-│   └── clawshire-financial-analysis/       # 财务风险分析技能
-│       ├── SKILL.md                        # 技能描述与工作流
-│       └── scripts/
-│           └── financial_analysis_client.py# 财务风险分析 CLI
+│   ├── clawshire-financial-analysis/       # 财务风险分析技能
+│   │   ├── SKILL.md                        # 技能描述与工作流
+│   │   └── scripts/
+│   │       └── financial_analysis_client.py # 财务风险分析 CLI
+│   └── clawshire-doc-extract-engine/       # 通用 PDF 文档提取技能
+│       ├── SKILL.md
+│       ├── scripts/
+│       │   └── clawshire_doc_extract_client.py
+│       └── evals/
+│           └── evals.json
 └── README.md
 ```
 

@@ -1,6 +1,6 @@
 ---
 name: clawshire-financial-analysis
-description: ClawShire 财务风险分析技能 - 上传上市公司年报 PDF，调用 25+ 条分析规则输出整体风险评级（低/中/高）及各规则详细结论
+description: ClawShire 财务风险分析技能 - 上传上市公司年报 PDF，调用 25+ 条分析规则输出整体风险评级（低/中/高）及各规则详细结论，并输出HTML文件。
 ---
 
 # ClawShire 财务风险分析技能
