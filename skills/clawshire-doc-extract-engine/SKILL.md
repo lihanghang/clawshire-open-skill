@@ -1,6 +1,6 @@
 ---
 name: clawshire-doc-extract-engine
-description: ClawShire 通用文档提取技能 - 用户上传 PDF（单个或多个），通过自然语言设计 Schema、执行结构化提取与多轮迭代修正；对接平台 /api/v1/doc-extract-engine，不依赖公告 met_uuid
+description: ClawShire 通用文档提取技能 - 用户上传 PDF（单个或多个），通过自然语言设计 Schema、执行结构化提取与多轮迭代修正；支持历史 schema 记忆复用，同类文档无需重复设计；对接平台 /api/v1/doc-extract-engine，不依赖公告 met_uuid
 ---
 
 # ClawShire 通用文档提取引擎技能
@@ -43,7 +43,93 @@ Authorization: Bearer $CLAWSHIRE_API_KEY
 
 ---
 
-## 标准工作流
+## 工作流选择
+
+```text
+收到新文档
+    ↓
+① sessions-summary 查看历史任务
+    ↓
+  ┌──────────────────────┬────────────────────────────┐
+  │ 有相似历史任务         │ 全新文档类型                │
+  ↓                      ↓
+② 记忆复用流程            首次完整流程
+  （跳过 schema-chat）    （schema-create → chat）
+```
+
+---
+
+## 记忆复用流程（有历史任务时优先）
+
+### 第一步：查看历史任务及 schema 预览
+
+```bash
+python clawshire_doc_extract_client.py sessions-summary
+```
+
+输出示例：
+
+```text
+────────────────────────────────────────────────────────────────
+  历史提取任务（共 2 条）
+────────────────────────────────────────────────────────────────
+
+  [1] 合同提取-项目A  2026-03-10  文档数: 3
+       字段: 甲方, 乙方, 合同金额, 签署日期, 有效期
+
+  [2] 财务总监辞职任命提取  2026-03-20  文档数: 1
+       字段: resignation_info.name, resignation_info.position,
+             appointment_info.name, appointment_info.position ... (共 12 个字段)
+
+  复用方式: session-create --name <名称> --from-session <id> --doc-ids <ids>
+────────────────────────────────────────────────────────────────
+```
+
+根据字段预览判断：
+
+- **字段完全匹配** → 直接 `--from-session` 复用
+- **字段基本符合但需微调** → `schema-export` 导出后修改，再用 `--schema-file` 创建
+- **完全不同** → 走首次完整流程
+
+### 第二步：上传新文档
+
+```bash
+python clawshire_doc_extract_client.py upload ./新文档.pdf
+# → {"document_ids": ["new-doc-uuid"], "count": 1}
+```
+
+### 第三步：复用历史 schema 直接创建 Session
+
+```bash
+# 直接复用 session 2 的 schema（跳过 schema-chat）
+python clawshire_doc_extract_client.py session-create \
+  --name "辞职任命提取-批次2" \
+  --from-session 2 \
+  --doc-ids "new-doc-uuid"
+# → {"session_id": 3}
+```
+
+### 第四步：执行提取
+
+```bash
+python clawshire_doc_extract_client.py extract \
+  --session-id 3 --doc-ids "new-doc-uuid"
+```
+
+### 导出并修改 schema 后复用
+
+```bash
+# 导出历史 schema 到文件
+python clawshire_doc_extract_client.py schema-export 2 --out my_schema.json
+
+# 手动编辑 my_schema.json 后创建新 session
+python clawshire_doc_extract_client.py session-create \
+  --name "调整版任务" --schema-file my_schema.json --doc-ids "new-doc-uuid"
+```
+
+---
+
+## 首次完整流程（全新文档类型）
 
 每步骤都会返回一个 ID，需传入下一步，链路如下：
 
@@ -57,17 +143,11 @@ upload → document_id
                            └→ batch-end(batch_id) → 归档
 ```
 
----
-
 ### 步骤 1：上传 PDF
 
 `POST .../upload`，`multipart/form-data`，字段名 **`files`**（可多个）。
 
 响应：`{"document_ids": ["uuid1", ...], "count": N}`
-
-> 保存 `document_ids` 用于后续所有步骤。
-
----
 
 ### 步骤 2：开启 Schema 设计对话
 
@@ -75,15 +155,13 @@ upload → document_id
 
 响应：`{"conversation_id": <int>}`
 
----
-
 ### 步骤 3：描述提取需求（可多轮）
 
 `POST .../schema-conversations/{conversation_id}/chat`，body：`{"message": "请提取甲方、乙方、合同金额、签署日期"}`
 
 > **耗时提示：** 此步骤通常需要 30 秒～3 分钟，请告知用户等待。
 
-响应为服务端聚合 SSE 后的 JSON，关键字段：
+响应关键字段：
 
 ```json
 {
@@ -94,127 +172,101 @@ upload → document_id
 }
 ```
 
-若 `schema` 字段为空，用 `schema-get {conversation_id}` 单独拉取。
-
-**⚠️ 关键步骤：** `schema-chat` 返回的 `schema` 字段需手动保存为 JSON 文件，才能传给 `session-create`：
-
-```bash
-# 将 schema-chat 输出中的 schema 字段内容保存到文件
-# 例：从输出 JSON 中提取 .schema 部分写入 schema.json
-python -c "
-import json, sys
-data = json.load(sys.stdin)
-with open('schema.json', 'w') as f:
-    json.dump(data['schema'], f, ensure_ascii=False, indent=2)
-" < schema_chat_output.json
-```
-
-或手动复制 `schema` 字段内容到 `schema.json`。
-
----
+**⚠️ 关键步骤：** `schema-chat` 返回的 `schema` 字段需手动保存为 JSON 文件，再传给 `session-create --schema-file`。
 
 ### 步骤 4：创建提取 Session
 
-`POST .../sessions`，body：
-
-```json
-{
-  "session_name": "财务总监辞职任命提取",
-  "extraction_schema": { "type": "object", "properties": { ... } },
-  "document_ids": ["uuid1"]
-}
+```bash
+python clawshire_doc_extract_client.py session-create \
+  --name "任务名" --schema-file schema.json --doc-ids "uuid1"
 ```
 
 响应：`{"session_id": <int>}`
 
----
-
 ### 步骤 5：执行提取
 
-`POST .../extract`，body：`{"session_id": 1, "document_ids": ["uuid1"]}`
+```bash
+python clawshire_doc_extract_client.py extract \
+  --session-id 1 --doc-ids "uuid1"
+```
 
 > **耗时提示：** 此步骤通常需要 1～5 分钟，请告知用户等待。
 
-响应包含 `batch_id` 和 `results`：
-
-```json
-{
-  "batch_id": 2,
-  "results": [
-    {
-      "document_id": "uuid1",
-      "data": { ... }
-    }
-  ]
-}
-```
-
----
+响应包含 `batch_id` 和 `results`。
 
 ### 步骤 6：迭代修正（可选）
 
-`POST .../batches/{batch_id}/chat`，body：`{"message": "把金额统一成数字，去掉货币符号"}`
+```bash
+python clawshire_doc_extract_client.py batch-chat 2 "把金额统一成数字，去掉货币符号"
+```
 
-> **耗时提示：** 同上，需 1～3 分钟。可重复多轮，每轮均返回修正后的完整 `results`。
-
----
+可重复多轮，每轮返回修正后的完整 `results`。
 
 ### 步骤 7：归档
 
-`POST .../batches/{batch_id}/end`
-
-**何时调用：** 提取结果已确认无需修正时调用，标记批次完成。若只是临时测试可跳过，但正式任务建议归档以便后续通过 `history` 接口查询。
-
----
-
-## 完整端到端示例
-
-以「财务总监辞职暨聘任公告」PDF 提取辞职人、任命人信息为例：
-
 ```bash
-export CLAWSHIRE_API_KEY="sk_your_local_key"
-export CLAWSHIRE_API_BASE_URL="http://localhost:8452"  # 本地测试时设置
-
-SCRIPT="python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py"
-
-# 1. 上传 PDF，记录 document_id
-$SCRIPT upload ./公告.pdf
-# → {"document_ids": ["fef11765-b827-486a-a2be-a6aeae617105"], "count": 1}
-DOC_ID="fef11765-b827-486a-a2be-a6aeae617105"
-
-# 2. 创建 Schema 对话，记录 conversation_id
-$SCRIPT schema-create --doc-ids "$DOC_ID"
-# → {"conversation_id": 2}
-
-# 3. 描述提取需求（等待 30s～3min）
-$SCRIPT schema-chat 2 "提取辞职人姓名、职务、辞职原因，以及新任命人姓名、职务、任命日期、任职期限"
-# → 返回含 schema 字段的 JSON，手动将 schema 保存为 schema.json
-
-# 4. 创建 Session
-$SCRIPT session-create --name "辞职任命提取" --schema-file schema.json --doc-ids "$DOC_ID"
-# → {"session_id": 2}
-
-# 5. 执行提取（等待 1～5min）
-$SCRIPT extract --session-id 2 --doc-ids "$DOC_ID"
-# → {"batch_id": 2, "results": [...]}
-
-# 6. 可选：修正
-$SCRIPT batch-chat 2 "辞职生效日期补充具体日期，若文中未提及则填'文件送达即生效'"
-
-# 7. 归档
-$SCRIPT batch-end 2
+python clawshire_doc_extract_client.py batch-end 2
 ```
+
+**何时调用：** 结果已确认无需修正时归档，正式任务建议执行以便 `history` 接口查询。
 
 ---
 
 ## 辅助接口
 
-| 说明 | 方法 | 路径 |
+| 说明 | 方法 | CLI 命令 |
 | --- | --- | --- |
-| 连通性检测 | GET | `/status` |
-| 引擎 Session 列表 | GET | `/sessions` |
-| Session 历史 | GET | `/sessions/{session_id}/history` |
-| 引擎账号绑定信息 | GET | `/token-info` |
+| 连通性检测 | GET /status | `status` |
+| 历史任务预览（复用入口） | GET /sessions + history | `sessions-summary` |
+| 导出历史 schema | GET /sessions/{id}/history | `schema-export <id>` |
+| 原始 Session 列表 | GET /sessions | `sessions` |
+| Session 历史详情 | GET /sessions/{id}/history | `history <id>` |
+
+---
+
+## 完整端到端示例
+
+以「财务总监辞职暨聘任公告」PDF 为例：
+
+```bash
+export CLAWSHIRE_API_KEY="sk_your_local_key"
+export CLAWSHIRE_API_BASE_URL="http://localhost:8452"
+
+SCRIPT="python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py"
+
+# 0. 先检查是否有可复用的历史任务
+$SCRIPT sessions-summary
+
+# --- 若无相似历史任务，走完整流程 ---
+
+# 1. 上传 PDF
+$SCRIPT upload ./公告.pdf
+# → {"document_ids": ["fef11765-..."], "count": 1}
+
+# 2. 创建 Schema 对话
+$SCRIPT schema-create --doc-ids "fef11765-..."
+# → {"conversation_id": 2}
+
+# 3. 描述提取需求（等待 30s～3min）
+$SCRIPT schema-chat 2 "提取辞职人姓名、职务、辞职原因，以及新任命人姓名、职务、任命日期、任职期限"
+# → 手动将返回 JSON 中的 schema 字段保存为 schema.json
+
+# 4. 创建 Session
+$SCRIPT session-create --name "辞职任命提取" --schema-file schema.json --doc-ids "fef11765-..."
+# → {"session_id": 2}
+
+# 5. 执行提取（等待 1～5min）
+$SCRIPT extract --session-id 2 --doc-ids "fef11765-..."
+# → {"batch_id": 2, "results": [...]}
+
+# 6. 归档
+$SCRIPT batch-end 2
+
+# --- 下次遇到同类公告，直接复用 ---
+$SCRIPT upload ./新公告.pdf
+$SCRIPT session-create --name "辞职任命-批次2" --from-session 2 --doc-ids "new-uuid"
+$SCRIPT extract --session-id 3 --doc-ids "new-uuid"
+```
 
 ---
 
