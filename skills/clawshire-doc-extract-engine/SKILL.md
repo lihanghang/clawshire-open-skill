@@ -21,15 +21,17 @@ SCRIPT="python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract
 # 第一步：上传 PDF，记下返回的 document_id
 $SCRIPT upload 合同.pdf
 
-# 第二步：设计提取字段（一句话描述即可）
+# 第二步：设计提取字段（一句话描述即可，需要 30秒～3分钟）
 $SCRIPT schema-create --doc-ids <document_id>
 $SCRIPT schema-chat <conversation_id> "提取甲方、乙方、合同金额、签署日期" --save-as 合同
 
-# 第三步：创建 Session 并提取，结果写入文件
+# 第三步：创建 Session 并提取，结果写入文件（需要 1～5分钟）
 $SCRIPT session-create --name "合同提取" --from-lib 合同 --doc-ids <document_id>
 $SCRIPT extract --session-id <session_id> --doc-ids <document_id> --out result.json --auto-end --quiet
 ```
 
+> **耗时提示：** `schema-chat` 需要 30秒～3分钟，`extract` 需要 1～5分钟。脚本已内置重试机制，遇到 504 超时会自动重试 2 次。
+>
 > `--auto-end` 自动归档并触发平台经验学习；`--quiet` 仅打印字段覆盖率概要，不把完整 JSON 输出到终端。
 
 ---

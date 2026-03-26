@@ -74,12 +74,32 @@ def _print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _retry_request(func, max_retries: int = 2, desc: str = "请求") -> Any:
+    """重试机制：处理 504 等超时错误"""
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 504 and attempt < max_retries:
+                print(f"  ⚠ {desc}超时 (504)，{attempt + 1}/{max_retries} 次重试中...", file=sys.stderr)
+                continue
+            raise
+        except httpx.TimeoutException as e:
+            if attempt < max_retries:
+                print(f"  ⚠ {desc}超时，{attempt + 1}/{max_retries} 次重试中...", file=sys.stderr)
+                continue
+            raise
+    raise Exception(f"{desc}失败，已重试 {max_retries} 次")
+
+
 def _save_json(data: Any, out: str, label: str = "result") -> str:
     """将 data 写入 JSON 文件，out 为空时自动生成文件名，返回实际路径。"""
     if not out:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = f"{label}_{ts}.json"
     path = Path(out)
+    if not path.is_absolute():
+        path = Path.cwd() / path
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  已保存: {path}", file=sys.stderr)
     return str(path)
@@ -381,16 +401,21 @@ def cmd_schema_create(args: argparse.Namespace) -> None:
 
 def cmd_schema_chat(args: argparse.Namespace) -> None:
     cid = int(args.conversation_id)
-    with httpx.Client(timeout=TIMEOUT_LONG) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}/chat",
-            headers={**headers(), "Content-Type": "application/json"},
-            json={"message": args.message},
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
+    print("  ⏳ Schema 设计中，预计需要 30秒～3分钟...", file=sys.stderr)
+
+    def _do_request():
+        with httpx.Client(timeout=TIMEOUT_LONG) as c:
+            r = c.post(
+                f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}/chat",
+                headers={**headers(), "Content-Type": "application/json"},
+                json={"message": args.message},
+            )
+        if r.status_code >= 400:
+            print(r.text, file=sys.stderr)
+            sys.exit(1)
+        return r.json()
+
+    data = _retry_request(_do_request, max_retries=2, desc="Schema 设计")
     _print_json(data)
 
     # 自动保存 schema 到本地库（--save-as 指定时）
@@ -427,6 +452,8 @@ def cmd_session_create(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
 
     # 优先级：--from-lib > --schema-file
+    # 注意：--from-session 已移除，因为后端 API 不支持获取 session 的 schema
+    # 请使用 schema-export 导出后再用 --schema-file 或保存到本地库后用 --from-lib
     if args.from_lib:
         lib = _lib_load()
         if args.from_lib not in lib:
@@ -525,16 +552,21 @@ def cmd_extract(args: argparse.Namespace) -> None:
             print("  提示: 提取完成后缓存将自动写入，下次可用 --use-cache 命中", file=sys.stderr)
 
     body = {"session_id": session_id, "document_ids": ids}
-    with httpx.Client(timeout=TIMEOUT_LONG) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/extract",
-            headers={**headers(), "Content-Type": "application/json"},
-            json=body,
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
+    print("  ⏳ 文档提取中，预计需要 1～5分钟...", file=sys.stderr)
+
+    def _do_extract():
+        with httpx.Client(timeout=TIMEOUT_LONG) as c:
+            r = c.post(
+                f"{base_url()}/api/v1/doc-extract-engine/extract",
+                headers={**headers(), "Content-Type": "application/json"},
+                json=body,
+            )
+        if r.status_code >= 400:
+            print(r.text, file=sys.stderr)
+            sys.exit(1)
+        return r.json()
+
+    data = _retry_request(_do_extract, max_retries=2, desc="文档提取")
 
     if quiet:
         _print_summary(data)
@@ -595,16 +627,21 @@ def cmd_batch_result(args: argparse.Namespace) -> None:
 def cmd_batch_chat(args: argparse.Namespace) -> None:
     bid = int(args.batch_id)
     quiet = getattr(args, "quiet", False)
-    with httpx.Client(timeout=TIMEOUT_LONG) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
-            headers={**headers(), "Content-Type": "application/json"},
-            json={"message": args.message},
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
+    print("  ⏳ 批次修正中，预计需要 30秒～3分钟...", file=sys.stderr)
+
+    def _do_chat():
+        with httpx.Client(timeout=TIMEOUT_LONG) as c:
+            r = c.post(
+                f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
+                headers={**headers(), "Content-Type": "application/json"},
+                json={"message": args.message},
+            )
+        if r.status_code >= 400:
+            print(r.text, file=sys.stderr)
+            sys.exit(1)
+        return r.json()
+
+    data = _retry_request(_do_chat, max_retries=2, desc="批次修正")
 
     if quiet:
         _print_summary(data)
