@@ -6,28 +6,28 @@ ClawShire 文档提取引擎 CLI — /api/v1/doc-extract-engine/*
 环境: CLAWSHIRE_API_KEY
 可选: CLAWSHIRE_API_BASE_URL（默认 https://api.clawshire.cn）
 
-记忆复用流程（推荐）：
-    # 查看历史任务及 schema 预览，判断是否有可复用的
-    python clawshire_doc_extract_client.py sessions-summary
+快速开始（三步）：
+    1. python clawshire_doc_extract_client.py upload a.pdf
+    2. python clawshire_doc_extract_client.py schema-create --doc-ids <id>
+       python clawshire_doc_extract_client.py schema-chat <conv_id> "提取甲方、乙方、金额"
+       python clawshire_doc_extract_client.py session-create --name 任务 --schema-file schema.json --doc-ids <id>
+    3. python clawshire_doc_extract_client.py extract --session-id <sid> --doc-ids <id> --out result.json --auto-end
 
-    # 有相似任务时，直接复用其 schema 创建新 session（跳过 schema-chat）
-    python clawshire_doc_extract_client.py session-create \\
-        --name "新任务" --from-session 2 --doc-ids "new_doc_id"
+高级用法（省 Token / 省额度）：
+    --quiet       不打印完整 JSON，仅打印字段覆盖率概要（配合 --out 使用）
+    --use-cache   命中本地缓存时读取已有 batch 结果，不消耗提取额度
+    --summary     batch-result 仅显示覆盖率和首条预览
+    --from-lib    从本地 schema 库复用，跳过 schema-chat 流程
+    --search      schema-lib-list 关键字模糊过滤
 
-    # 导出历史 schema 到文件（便于查看或手动修改后复用）
-    python clawshire_doc_extract_client.py schema-export 2 --out schema.json
-
-完整首次流程：
-    python clawshire_doc_extract_client.py upload a.pdf
-    python clawshire_doc_extract_client.py schema-create --doc-ids id1
-    python clawshire_doc_extract_client.py schema-chat 1 "提取标题和摘要"
-    python clawshire_doc_extract_client.py session-create --name "任务" --schema-file schema.json --doc-ids id1
-    python clawshire_doc_extract_client.py extract --session-id 1 --doc-ids id1
+缓存文件：~/.clawshire/cache.json（按 API Key + BaseURL + session_id + doc_ids 隔离）
+Schema 库：~/.clawshire/schemas.json（跨 key 复用）
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -43,7 +43,13 @@ except ImportError:
 
 DEFAULT_BASE = "https://api.clawshire.cn"
 TIMEOUT_LONG = 600.0
+SCHEMA_LIB_PATH = Path.home() / ".clawshire" / "schemas.json"
+CACHE_PATH = Path.home() / ".clawshire" / "cache.json"
 
+
+# ──────────────────────────────────────────────
+# 基础工具
+# ──────────────────────────────────────────────
 
 def base_url() -> str:
     return os.environ.get("CLAWSHIRE_API_BASE_URL", DEFAULT_BASE).rstrip("/")
@@ -68,49 +74,103 @@ def _print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
-def _save_json(data: Any, out: str, label: str = "结果") -> None:
-    """将 data 写入 JSON 文件，out 为空时自动生成文件名。"""
+def _save_json(data: Any, out: str, label: str = "result") -> str:
+    """将 data 写入 JSON 文件，out 为空时自动生成文件名，返回实际路径。"""
     if not out:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = f"{label}_{ts}.json"
     path = Path(out)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"  已保存到: {path}", file=sys.stderr)
+    print(f"  已保存: {path}", file=sys.stderr)
+    return str(path)
 
 
-def _fetch_session_schema(client: httpx.Client, session_id: int) -> dict | None:
-    """从 session history 中还原 extraction_schema。"""
-    try:
-        r = client.get(
-            f"{base_url()}/api/v1/doc-extract-engine/sessions/{session_id}/history",
-            headers=headers(),
-        )
-        if r.status_code >= 400:
-            return None
-        data = r.json()
-        # history 可能是列表或含 extraction_schema 字段的对象，兼容两种格式
-        if isinstance(data, dict):
-            return data.get("extraction_schema") or data.get("schema")
-        if isinstance(data, list) and data:
-            first = data[0]
-            return first.get("extraction_schema") or first.get("schema")
-    except Exception:
-        pass
-    return None
+def _extract_fields(result_item: dict) -> dict:
+    """
+    从结果条目中提取字段数据，兼容多种 API 响应结构。
+    按优先级尝试已知字段名，最终 fallback 为去掉元数据字段后的剩余内容。
+    """
+    for key in ("extracted_data", "result", "data", "extraction", "fields"):
+        v = result_item.get(key)
+        if isinstance(v, dict) and v:
+            return v
+    # Fallback：排除已知元数据键，返回剩余字段
+    meta_keys = {"document_id", "batch_id", "id", "status", "created_at", "updated_at", "error"}
+    return {k: v for k, v in result_item.items() if k not in meta_keys}
+
+
+def _print_summary(data: Any) -> None:
+    """打印提取结果的统计概要，避免打印完整大 JSON（节省 Token）。"""
+    if not isinstance(data, dict):
+        _print_json(data)
+        return
+
+    batch_id = data.get("batch_id", data.get("id", "-"))
+    results = data.get("results", [])
+    doc_count = len(results)
+
+    print(f"\n  batch_id    : {batch_id}")
+    print(f"  文档数量    : {doc_count}")
+
+    if results:
+        # 统计字段覆盖率
+        all_keys: set[str] = set()
+        filled: dict[str, int] = {}
+        for r in results:
+            extracted = _extract_fields(r)
+            for k, v in extracted.items():
+                all_keys.add(k)
+                if v not in (None, "", [], {}):
+                    filled[k] = filled.get(k, 0) + 1
+
+        if all_keys:
+            print("  字段覆盖率  :")
+            for k in sorted(all_keys):
+                cnt = filled.get(k, 0)
+                bar = "█" * cnt + "░" * (doc_count - cnt)
+                print(f"    {k:<20} {bar}  {cnt}/{doc_count}")
+        else:
+            print("  ⚠ 未识别到提取字段，建议直接用 batch-result 查看完整响应确认字段结构")
+
+        # 首条文档预览
+        first = results[0]
+        doc_id = first.get("document_id", "-")
+        extracted = _extract_fields(first)
+        print(f"\n  首文档预览  : (doc={doc_id})")
+        if extracted:
+            for k, v in list(extracted.items())[:5]:
+                val_str = str(v)[:60] + ("..." if len(str(v)) > 60 else "")
+                print(f"    {k}: {val_str}")
+            if len(extracted) > 5:
+                print(f"    ... 共 {len(extracted)} 个字段")
+        else:
+            print("    (无可识别字段)")
+    print()
+
+
+# ──────────────────────────────────────────────
+# 本地 schema 库（~/.clawshire/schemas.json）
+# ──────────────────────────────────────────────
+
+def _lib_load() -> dict:
+    if SCHEMA_LIB_PATH.exists():
+        return json.loads(SCHEMA_LIB_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def _lib_save(lib: dict) -> None:
+    SCHEMA_LIB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCHEMA_LIB_PATH.write_text(json.dumps(lib, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _schema_field_preview(schema: dict | None, max_fields: int = 8) -> str:
-    """将 schema properties 展开为可读的字段预览字符串。"""
     if not schema or not isinstance(schema, dict):
         return "(无 schema)"
-    props = schema.get("properties", {})
-    if not props:
-        return "(schema 无字段)"
 
     def _collect(obj: dict, prefix: str = "") -> list[str]:
         fields = []
         for k, v in obj.get("properties", {}).items():
-            full = f"{prefix}{k}" if not prefix else f"{prefix}.{k}"
+            full = f"{prefix}.{k}" if prefix else k
             if isinstance(v, dict) and "properties" in v:
                 fields.extend(_collect(v, full))
             else:
@@ -121,11 +181,139 @@ def _schema_field_preview(schema: dict | None, max_fields: int = 8) -> str:
     preview = ", ".join(fields[:max_fields])
     if len(fields) > max_fields:
         preview += f" ... (共 {len(fields)} 个字段)"
-    return preview
+    return preview or "(schema 无字段)"
+
+
+def cmd_schema_lib_list(args: argparse.Namespace) -> None:
+    """列出本地 schema 库中所有已保存的 schema，支持关键字过滤。"""
+    lib = _lib_load()
+    if not lib:
+        print("本地 schema 库为空。\n使用 schema-lib-save 保存 schema 后可跨 key 复用。")
+        return
+
+    search = (args.search or "").strip().lower()
+    matched = {
+        name: entry for name, entry in lib.items()
+        if not search or search in name.lower() or search in (entry.get("description") or "").lower()
+    }
+
+    if not matched:
+        print(f"未找到包含 '{search}' 的 schema，使用 schema-lib-list 查看所有。")
+        return
+
+    print(f"\n{'─' * 60}")
+    print(f"  本地 schema 库  ({SCHEMA_LIB_PATH})")
+    if search:
+        print(f"  过滤关键字: {search}  ({len(matched)}/{len(lib)} 条)")
+    print(f"{'─' * 60}")
+    for name, entry in matched.items():
+        saved_at = entry.get("saved_at", "")[:10]
+        desc = entry.get("description", "")
+        preview = _schema_field_preview(entry.get("schema"))
+        print(f"\n  [{name}]  {saved_at}  {desc}")
+        print(f"    字段: {preview}")
+    print(f"\n{'─' * 60}")
+    print("  复用方式: session-create --name <任务名> --from-lib <name> --doc-ids <ids>")
+    print(f"{'─' * 60}\n")
+
+
+def cmd_schema_lib_save(args: argparse.Namespace) -> None:
+    """将 schema 文件保存到本地库，供跨 key 复用。"""
+    schema_path = Path(args.file)
+    if not schema_path.exists():
+        print(f"找不到文件: {schema_path}", file=sys.stderr)
+        sys.exit(1)
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    lib = _lib_load()
+    if args.name in lib:
+        existing_at = lib[args.name].get("saved_at", "")[:10]
+        print(f"  已覆盖更新 [{args.name}]（原保存于 {existing_at}）")
+    else:
+        print(f"  已保存 [{args.name}] 到本地 schema 库")
+    lib[args.name] = {
+        "schema": schema,
+        "description": args.description or "",
+        "saved_at": datetime.now().isoformat(),
+    }
+    _lib_save(lib)
+    print(f"  字段: {_schema_field_preview(schema)}")
+
+
+def cmd_schema_lib_delete(args: argparse.Namespace) -> None:
+    """从本地库删除指定 schema。"""
+    lib = _lib_load()
+    if args.name not in lib:
+        print(f"未找到 [{args.name}]，请先用 schema-lib-list 查看可用名称。", file=sys.stderr)
+        sys.exit(1)
+    del lib[args.name]
+    _lib_save(lib)
+    print(f"  已删除 [{args.name}]")
 
 
 # ──────────────────────────────────────────────
-# 命令实现
+# 本地提取缓存（~/.clawshire/cache.json）
+# ──────────────────────────────────────────────
+
+def _env_sig() -> str:
+    """
+    生成环境签名（API Key + BaseURL 的 hash 前缀）。
+    用于缓存键隔离，防止多环境/多 Key 缓存污染。
+    不存储明文 Key。
+    """
+    key = os.environ.get("CLAWSHIRE_API_KEY", "")
+    url = os.environ.get("CLAWSHIRE_API_BASE_URL", DEFAULT_BASE)
+    return hashlib.md5(f"{url}:{key}".encode()).hexdigest()[:8]
+
+
+def _cache_key(session_id: int | str, doc_ids: list[str]) -> str:
+    """生成缓存键：环境签名 + session_id + 排序后的 doc_ids。"""
+    ids_str = ",".join(sorted(doc_ids))
+    return f"{_env_sig()}:{session_id}:{ids_str}"
+
+
+def _cache_load() -> dict:
+    if CACHE_PATH.exists():
+        return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def _cache_save(cache: dict) -> None:
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _cache_get(session_id: int | str, doc_ids: list[str]) -> dict | None:
+    """查询缓存，返回 {batch_id, created_at, archived?} 或 None。"""
+    cache = _cache_load()
+    return cache.get(_cache_key(session_id, doc_ids))
+
+
+def _cache_put(session_id: int | str, doc_ids: list[str], batch_id: int | str) -> None:
+    """写入缓存条目（archived=False）。"""
+    cache = _cache_load()
+    cache[_cache_key(session_id, doc_ids)] = {
+        "batch_id": batch_id,
+        "session_id": str(session_id),
+        "doc_ids": sorted(doc_ids),
+        "created_at": datetime.now().isoformat(),
+        "archived": False,
+    }
+    _cache_save(cache)
+    print(f"  缓存已写入: session={session_id} batch_id={batch_id}", file=sys.stderr)
+
+
+def _cache_mark_archived(session_id: int | str, doc_ids: list[str]) -> None:
+    """将缓存条目标记为已归档，--use-cache 命中时会给出相应提示。"""
+    cache = _cache_load()
+    key = _cache_key(session_id, doc_ids)
+    if key in cache:
+        cache[key]["archived"] = True
+        cache[key]["archived_at"] = datetime.now().isoformat()
+        _cache_save(cache)
+
+
+# ──────────────────────────────────────────────
+# API 命令
 # ──────────────────────────────────────────────
 
 def cmd_status(_: argparse.Namespace) -> None:
@@ -135,20 +323,36 @@ def cmd_status(_: argparse.Namespace) -> None:
     _print_json(r.json())
 
 
+def _fetch_pdf_from_url(url: str) -> tuple[str, bytes]:
+    """下载 URL 指向的 PDF，返回 (文件名, 内容字节)。"""
+    print(f"  正在下载: {url}", file=sys.stderr)
+    with httpx.Client(timeout=TIMEOUT_LONG, follow_redirects=True) as c:
+        r = c.get(url)
+    if r.status_code >= 400:
+        print(f"下载失败 [{r.status_code}]: {url}", file=sys.stderr)
+        sys.exit(1)
+    name = url.rstrip("/").split("/")[-1]
+    if not name.lower().endswith(".pdf"):
+        name = name + ".pdf" if name else "downloaded.pdf"
+    print(f"  已下载: {name} ({len(r.content)} bytes)", file=sys.stderr)
+    return name, r.content
+
+
 def cmd_upload(args: argparse.Namespace) -> None:
-    paths = [Path(p) for p in args.files]
-    for p in paths:
-        if not p.exists():
-            print(f"文件不存在: {p}", file=sys.stderr)
-            sys.exit(1)
-        if p.suffix.lower() != ".pdf":
-            print(f"非 PDF: {p}", file=sys.stderr)
-            sys.exit(1)
     multipart: list[tuple[str, Any]] = []
-    for p in paths:
-        multipart.append(
-            ("files", (p.name, p.read_bytes(), "application/pdf")),
-        )
+    for item in args.files:
+        if item.startswith("http://") or item.startswith("https://"):
+            name, data = _fetch_pdf_from_url(item)
+            multipart.append(("files", (name, data, "application/pdf")))
+        else:
+            p = Path(item)
+            if not p.exists():
+                print(f"文件不存在: {p}", file=sys.stderr)
+                sys.exit(1)
+            if p.suffix.lower() != ".pdf":
+                print(f"非 PDF: {p}", file=sys.stderr)
+                sys.exit(1)
+            multipart.append(("files", (p.name, p.read_bytes(), "application/pdf")))
     with httpx.Client(timeout=TIMEOUT_LONG) as c:
         r = c.post(
             f"{base_url()}/api/v1/doc-extract-engine/upload",
@@ -163,12 +367,11 @@ def cmd_upload(args: argparse.Namespace) -> None:
 
 def cmd_schema_create(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
-    body = {"document_ids": ids}
     with httpx.Client(timeout=120.0) as c:
         r = c.post(
             f"{base_url()}/api/v1/doc-extract-engine/schema-conversations",
             headers={**headers(), "Content-Type": "application/json"},
-            json=body,
+            json={"document_ids": ids},
         )
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
@@ -178,17 +381,35 @@ def cmd_schema_create(args: argparse.Namespace) -> None:
 
 def cmd_schema_chat(args: argparse.Namespace) -> None:
     cid = int(args.conversation_id)
-    body = {"message": args.message}
     with httpx.Client(timeout=TIMEOUT_LONG) as c:
         r = c.post(
             f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}/chat",
             headers={**headers(), "Content-Type": "application/json"},
-            json=body,
+            json={"message": args.message},
         )
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
         sys.exit(1)
-    _print_json(r.json())
+    data = r.json()
+    _print_json(data)
+
+    # 自动保存 schema 到本地库（--save-as 指定时）
+    if args.save_as and data.get("schema"):
+        lib = _lib_load()
+        # Fix #5: 检测同名 schema，拒绝静默覆盖
+        if args.save_as in lib:
+            existing_at = lib[args.save_as].get("saved_at", "")[:10]
+            print(f"\n  ⚠ 本地库中已存在 [{args.save_as}]（保存于 {existing_at}），跳过覆盖。", file=sys.stderr)
+            print(f"    如需更新，请用: schema-lib-save --name {args.save_as} --file <path>", file=sys.stderr)
+        else:
+            lib[args.save_as] = {
+                "schema": data["schema"],
+                "description": args.description or "",
+                "saved_at": datetime.now().isoformat(),
+            }
+            _lib_save(lib)
+            print(f"\n  schema 已自动保存到本地库 [{args.save_as}]", file=sys.stderr)
+            print(f"  字段: {_schema_field_preview(data['schema'])}", file=sys.stderr)
 
 
 def cmd_schema_get(args: argparse.Namespace) -> None:
@@ -202,80 +423,26 @@ def cmd_schema_get(args: argparse.Namespace) -> None:
     _print_json(r.json())
 
 
-def cmd_sessions_summary(_: argparse.Namespace) -> None:
-    """列出所有历史 Session，并附带 schema 字段预览，供 AI 判断是否可复用。"""
-    with httpx.Client(timeout=120.0) as c:
-        r = c.get(f"{base_url()}/api/v1/doc-extract-engine/sessions", headers=headers())
-        r.raise_for_status()
-        sessions = r.json()
-
-        if isinstance(sessions, dict):
-            sessions = sessions.get("data") or sessions.get("sessions") or sessions.get("items") or []
-
-        if not sessions:
-            print("暂无历史提取任务。")
-            return
-
-        print(f"\n{'─' * 64}")
-        print(f"  历史提取任务（共 {len(sessions)} 条）")
-        print(f"{'─' * 64}")
-
-        for s in sessions:
-            sid = s.get("id") or s.get("session_id")
-            name = s.get("session_name") or s.get("name") or "(无名称)"
-            created = str(s.get("created_at") or s.get("create_time") or "")[:10]
-            doc_count = len(s.get("document_ids") or [])
-
-            schema = _fetch_session_schema(c, int(sid))
-            preview = _schema_field_preview(schema)
-
-            print(f"\n  [{sid}] {name}  {created}  文档数: {doc_count}")
-            print(f"       字段: {preview}")
-
-        print(f"\n{'─' * 64}")
-        print("  复用方式: session-create --name <名称> --from-session <id> --doc-ids <ids>")
-        print(f"{'─' * 64}\n")
-
-
-def cmd_schema_export(args: argparse.Namespace) -> None:
-    """从历史 Session 导出 schema 到本地文件。"""
-    sid = int(args.session_id)
-    with httpx.Client(timeout=120.0) as c:
-        schema = _fetch_session_schema(c, sid)
-
-    if not schema:
-        print(f"未能从 session {sid} 获取 schema，请确认 session_id 正确。", file=sys.stderr)
-        sys.exit(1)
-
-    out_path = Path(args.out) if args.out else Path(f"schema_from_session_{sid}.json")
-    out_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"schema 已导出到: {out_path}")
-    print(f"字段预览: {_schema_field_preview(schema)}")
-
-
 def cmd_session_create(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
 
-    # 复用历史 schema
-    if args.from_session:
-        print(f"  正在从 session {args.from_session} 读取 schema...", end="", flush=True)
-        with httpx.Client(timeout=120.0) as c:
-            extraction_schema = _fetch_session_schema(c, int(args.from_session))
-        if not extraction_schema:
-            print(f"\n未能从 session {args.from_session} 获取 schema。", file=sys.stderr)
+    # 优先级：--from-lib > --schema-file
+    if args.from_lib:
+        lib = _lib_load()
+        if args.from_lib not in lib:
+            print(f"本地库中未找到 [{args.from_lib}]，请先用 schema-lib-list 查看可用名称。", file=sys.stderr)
             sys.exit(1)
-        print(f" ✓  字段: {_schema_field_preview(extraction_schema)}")
-
-    # 从文件读取 schema
+        extraction_schema = lib[args.from_lib]["schema"]
+        print(f"  复用本地 schema [{args.from_lib}]", file=sys.stderr)
+        print(f"  字段: {_schema_field_preview(extraction_schema)}", file=sys.stderr)
     elif args.schema_file:
         schema_path = Path(args.schema_file)
         if not schema_path.exists():
             print(f"找不到 schema 文件: {schema_path}", file=sys.stderr)
             sys.exit(1)
         extraction_schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
     else:
-        print("需要 --schema-file 或 --from-session 之一。", file=sys.stderr)
+        print("需要 --schema-file 或 --from-lib 之一。", file=sys.stderr)
         sys.exit(1)
 
     body = {
@@ -315,7 +482,49 @@ def cmd_history(args: argparse.Namespace) -> None:
 
 def cmd_extract(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
-    body = {"session_id": int(args.session_id), "document_ids": ids}
+    session_id = int(args.session_id)
+    quiet = getattr(args, "quiet", False)
+
+    # Fix #4 + Fix #2: --use-cache 命中检查
+    if args.use_cache:
+        hit = _cache_get(session_id, ids)
+        if hit:
+            batch_id = hit["batch_id"]
+            created_at = hit.get("created_at", "")[:19]
+            is_archived = hit.get("archived", False)
+            archived_at = hit.get("archived_at", "")[:19]
+
+            if is_archived:
+                print(f"  ⚠ 缓存命中但该 batch 已归档（batch_id={batch_id}，归档于 {archived_at}）", file=sys.stderr)
+                print("    归档后结果为只读快照，如需重新提取请去掉 --use-cache", file=sys.stderr)
+            else:
+                print(f"  缓存命中: session={session_id} batch_id={batch_id}  (创建于 {created_at})", file=sys.stderr)
+                print("  直接读取已有 batch 结果，不消耗提取额度", file=sys.stderr)
+
+            with httpx.Client(timeout=120.0) as c:
+                r = c.get(
+                    f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}",
+                    headers=headers(),
+                )
+            if r.status_code >= 400:
+                print(f"  拉取缓存结果失败 [{r.status_code}]", file=sys.stderr)
+                print("  缓存条目可能已失效，将重新提取（消耗提取额度）...", file=sys.stderr)
+                # 继续执行真实提取（fall through）
+            else:
+                data = r.json()
+                if quiet:
+                    _print_summary(data)
+                else:
+                    _print_json(data)
+                if args.out is not None:
+                    _save_json(data, args.out, label=f"extract_session{session_id}")
+                return
+        else:
+            # Fix #4: 明确告知用户缓存未命中，将消耗真实额度
+            print("  缓存未命中，将执行真实提取（消耗提取额度）", file=sys.stderr)
+            print("  提示: 提取完成后缓存将自动写入，下次可用 --use-cache 命中", file=sys.stderr)
+
+    body = {"session_id": session_id, "document_ids": ids}
     with httpx.Client(timeout=TIMEOUT_LONG) as c:
         r = c.post(
             f"{base_url()}/api/v1/doc-extract-engine/extract",
@@ -326,25 +535,82 @@ def cmd_extract(args: argparse.Namespace) -> None:
         print(r.text, file=sys.stderr)
         sys.exit(1)
     data = r.json()
-    _print_json(data)
+
+    if quiet:
+        _print_summary(data)
+    else:
+        _print_json(data)
+
+    # 写入本地缓存（在归档之前，archived=False）
+    batch_id = data.get("batch_id")
+    if batch_id:
+        _cache_put(session_id, ids, batch_id)
+
+    # 保存结果到本地
     if args.out is not None:
-        _save_json(data, args.out, label=f"extract_session{args.session_id}")
+        _save_json(data, args.out, label=f"extract_session{session_id}")
+
+    # 自动归档，归档成功后标记缓存
+    if args.auto_end:
+        if batch_id:
+            with httpx.Client(timeout=120.0) as c:
+                re = c.post(
+                    f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}/end",
+                    headers=headers(),
+                )
+            if re.status_code >= 400:
+                print(f"  归档失败: {re.text}", file=sys.stderr)
+            else:
+                # Fix #2: 归档成功后标记缓存，--use-cache 命中时会给出归档提示
+                _cache_mark_archived(session_id, ids)
+                end_data = re.json()
+                exp_id = end_data.get("experience_task_id", "")
+                print(f"\n  已自动归档 batch_id={batch_id}", file=sys.stderr)
+                if exp_id:
+                    print(f"  experience_task_id={exp_id}（平台将异步学习本次提取经验）", file=sys.stderr)
 
 
-def cmd_batch_chat(args: argparse.Namespace) -> None:
+def cmd_batch_result(args: argparse.Namespace) -> None:
+    """查询已有批次的提取结果，无需重新提取（不消耗额度）。"""
     bid = int(args.batch_id)
-    body = {"message": args.message}
-    with httpx.Client(timeout=TIMEOUT_LONG) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
-            headers={**headers(), "Content-Type": "application/json"},
-            json=body,
+    with httpx.Client(timeout=120.0) as c:
+        r = c.get(
+            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}",
+            headers=headers(),
         )
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
         sys.exit(1)
     data = r.json()
-    _print_json(data)
+
+    if getattr(args, "summary", False):
+        _print_summary(data)
+    else:
+        _print_json(data)
+
+    if args.out is not None:
+        _save_json(data, args.out, label=f"batch{bid}_result")
+
+
+def cmd_batch_chat(args: argparse.Namespace) -> None:
+    bid = int(args.batch_id)
+    quiet = getattr(args, "quiet", False)
+    with httpx.Client(timeout=TIMEOUT_LONG) as c:
+        r = c.post(
+            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
+            headers={**headers(), "Content-Type": "application/json"},
+            json={"message": args.message},
+        )
+    if r.status_code >= 400:
+        print(r.text, file=sys.stderr)
+        sys.exit(1)
+    data = r.json()
+
+    if quiet:
+        _print_summary(data)
+    else:
+        _print_json(data)
+
     if args.out is not None:
         _save_json(data, args.out, label=f"batch{bid}_chat")
 
@@ -359,8 +625,17 @@ def cmd_batch_end(args: argparse.Namespace) -> None:
     if r.status_code >= 400:
         print(r.text, file=sys.stderr)
         sys.exit(1)
-    _print_json(r.json())
+    data = r.json()
+    _print_json(data)
+    exp_id = data.get("experience_task_id", "")
+    if exp_id:
+        print(f"\n  experience_task_id={exp_id}", file=sys.stderr)
+        print("  平台将异步学习本次提取经验，下次同类文档提取质量将提升。", file=sys.stderr)
 
+
+# ──────────────────────────────────────────────
+# CLI 注册
+# ──────────────────────────────────────────────
 
 def main() -> None:
     p = argparse.ArgumentParser(description="ClawShire 文档提取引擎 CLI")
@@ -369,8 +644,8 @@ def main() -> None:
     sp = sub.add_parser("status", help="引擎状态")
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("upload", help="上传 PDF（可多文件）")
-    sp.add_argument("files", nargs="+", help="本地 .pdf 路径")
+    sp = sub.add_parser("upload", help="上传 PDF（本地路径或 http/https URL，可混用多个）")
+    sp.add_argument("files", nargs="+", help="本地 .pdf 路径 或 PDF URL（http/https）")
     sp.set_defaults(func=cmd_upload)
 
     sp = sub.add_parser("schema-create", help="创建 Schema 对话")
@@ -380,28 +655,37 @@ def main() -> None:
     sp = sub.add_parser("schema-chat", help="Schema 对话一轮")
     sp.add_argument("conversation_id", help="conversation_id")
     sp.add_argument("message", help="自然语言需求")
+    sp.add_argument("--save-as", default="", help="将返回的 schema 保存到本地库（指定名称）；同名已存在时跳过，不覆盖")
+    sp.add_argument("--description", default="", help="schema 描述，配合 --save-as 使用")
     sp.set_defaults(func=cmd_schema_chat)
 
     sp = sub.add_parser("schema-get", help="获取 Schema 对话状态")
     sp.add_argument("conversation_id", help="conversation_id")
     sp.set_defaults(func=cmd_schema_get)
 
-    sp = sub.add_parser("sessions-summary", help="列出历史任务及 schema 字段预览（复用入口）")
-    sp.set_defaults(func=cmd_sessions_summary)
+    # 本地 schema 库管理
+    sp = sub.add_parser("schema-lib-list", help="列出本地 schema 库（跨 key 复用入口）")
+    sp.add_argument("--search", default="", help="关键字模糊过滤（名称或描述）")
+    sp.set_defaults(func=cmd_schema_lib_list)
 
-    sp = sub.add_parser("schema-export", help="从历史 Session 导出 schema 到文件")
-    sp.add_argument("session_id", help="session_id")
-    sp.add_argument("--out", default="", help="输出文件路径（默认 schema_from_session_{id}.json）")
-    sp.set_defaults(func=cmd_schema_export)
+    sp = sub.add_parser("schema-lib-save", help="保存 schema 文件到本地库（允许覆盖，会提示）")
+    sp.add_argument("--name", required=True, help="schema 名称（如 人事变动、合同）")
+    sp.add_argument("--file", required=True, help="schema JSON 文件路径")
+    sp.add_argument("--description", default="", help="描述")
+    sp.set_defaults(func=cmd_schema_lib_save)
 
-    sp = sub.add_parser("session-create", help="创建提取 Session（支持复用历史 schema）")
+    sp = sub.add_parser("schema-lib-delete", help="从本地库删除 schema")
+    sp.add_argument("name", help="schema 名称")
+    sp.set_defaults(func=cmd_schema_lib_delete)
+
+    sp = sub.add_parser("session-create", help="创建提取 Session（支持本地库复用）")
     sp.add_argument("--name", required=True, help="session 名称")
     sp.add_argument("--schema-file", default="", help="JSON Schema 文件路径")
-    sp.add_argument("--from-session", default="", help="从历史 session 复用 schema（优先级高于 --schema-file）")
+    sp.add_argument("--from-lib", default="", help="从本地 schema 库复用（优先级高于 --schema-file）")
     sp.add_argument("--doc-ids", required=True, help="逗号分隔 document_id")
     sp.set_defaults(func=cmd_session_create)
 
-    sp = sub.add_parser("sessions", help="列出引擎 Session（原始 JSON）")
+    sp = sub.add_parser("sessions", help="列出引擎 Session")
     sp.set_defaults(func=cmd_session_list)
 
     sp = sub.add_parser("history", help="Session 历史")
@@ -413,16 +697,32 @@ def main() -> None:
     sp.add_argument("--doc-ids", required=True, help="逗号分隔 document_id")
     sp.add_argument("--out", nargs="?", const="", default=None,
                     help="保存结果 JSON（不指定路径时自动命名）")
+    sp.add_argument("--auto-end", action="store_true",
+                    help="提取完自动归档（batch-end），并标记缓存为 archived")
+    sp.add_argument("--quiet", action="store_true",
+                    help="仅打印字段覆盖率概要，不输出完整 JSON（配合 --out 节省 Token）")
+    sp.add_argument("--use-cache", action="store_true",
+                    help="优先读取本地缓存（按 API Key+URL+session+docs 隔离）；未命中时明确提示后执行真实提取")
     sp.set_defaults(func=cmd_extract)
+
+    sp = sub.add_parser("batch-result", help="查询已有批次结果（不重新提取，不消耗额度）")
+    sp.add_argument("batch_id", help="batch_id")
+    sp.add_argument("--out", nargs="?", const="", default=None,
+                    help="保存结果 JSON（不指定路径时自动命名）")
+    sp.add_argument("--summary", action="store_true",
+                    help="仅显示字段覆盖率和首条预览，不打印完整 JSON（节省 Token）")
+    sp.set_defaults(func=cmd_batch_result)
 
     sp = sub.add_parser("batch-chat", help="批次修正一轮")
     sp.add_argument("batch_id", help="batch_id")
     sp.add_argument("message", help="修正说明")
     sp.add_argument("--out", nargs="?", const="", default=None,
-                    help="保存修正结果 JSON（不指定路径时自动命名）")
+                    help="保存修正结果 JSON")
+    sp.add_argument("--quiet", action="store_true",
+                    help="仅打印字段覆盖率概要，不输出完整 JSON（节省 Token）")
     sp.set_defaults(func=cmd_batch_chat)
 
-    sp = sub.add_parser("batch-end", help="结束批次")
+    sp = sub.add_parser("batch-end", help="结束批次（归档，触发经验学习）")
     sp.add_argument("batch_id", help="batch_id")
     sp.set_defaults(func=cmd_batch_end)
 
