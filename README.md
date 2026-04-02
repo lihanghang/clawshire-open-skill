@@ -13,7 +13,19 @@
 
 ## 快速开始
 
-### 1. 获取 API Key
+### 1. 安装技能
+
+在 Claude AI 中安装本技能集：
+
+```bash
+# 克隆仓库到本地
+git clone https://github.com/lihanghang/clawshire-open-skill.git
+
+# 在 Claude 配置中添加技能路径
+# 或通过 Claude 插件市场安装
+```
+
+### 2. 配置 API Key
 
 登录 [ClawShire 控制台](https://clawshire.cn)，认证后手动创建 API Key，然后设置环境变量：
 
@@ -21,71 +33,35 @@
 export CLAWSHIRE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-### 2. 查询今日公告
+### 3. 在 Agent 中使用
 
-```bash
-python skills/clawshire-data-query/scripts/clawshire_client.py announcements
+安装后，直接在 Claude 对话中使用：
+
+**查询今日公告：**
+```
+帮我查询今天的上市公司公告
 ```
 
-### 3. 按证券代码查询公告
-
-```bash
-python skills/clawshire-data-query/scripts/clawshire_client.py stock 000001 \
-  --start-date 2026-03-01 --end-date 2026-03-10 --infotype 董事会决议
+**按证券代码查询：**
+```
+查询平安银行（000001）最近的董事会决议公告
 ```
 
-### 4. 按公告链接查询
-
-```bash
-python skills/clawshire-data-query/scripts/clawshire_client.py met-link \
-  "http://www.szse.cn/api/disc/info/query?id=123abc"
+**查询北交所年报：**
+```
+查询九典制药（833359）的 2024 年报数据
 ```
 
-### 5. 查询北交所年报
-
-```bash
-# 按证券代码查询年报
-python skills/clawshire-annual-report/scripts/clawshire_annual_client.py stock 833359
-
-# 查询全市场 2024 年报
-python skills/clawshire-annual-report/scripts/clawshire_annual_client.py list --year 2024
-
-# 导出为 Excel
-python skills/clawshire-annual-report/scripts/clawshire_annual_client.py list --year 2024 --output excel
+**年报财务风险分析：**
+```
+分析这份年报 PDF 的财务风险：/path/to/年报.pdf
 ```
 
-### 6. 年报财务风险分析
-
-```bash
-# 终端输出风险摘要
-python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf
-
-# 导出 HTML 报告（自动保存到 PDF 同目录）
-python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py analyze path/to/年报.pdf --output html
-
-# 查看所有分析规则
-python skills/clawshire-financial-analysis/scripts/financial_analysis_client.py rules
+**通用文档提取：**
 ```
-
-### 7. 通用文档提取（PDF + Schema 对话 + 迭代）
-
-需平台已启用文档提取插件；依赖 `httpx`：`pip install httpx`。
-
-```bash
-# 上传 PDF（可多文件）
-python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py upload ./a.pdf ./b.pdf
-
-# 创建 Schema 对话并对话一轮（doc_ids 来自上传响应）
-python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py schema-create --doc-ids "id1,id2"
-python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py schema-chat 1 "提取标题、签署日期、金额"
-
-# 创建 Session、执行提取（schema 可先保存为 schema.json）
-python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py session-create \
-  --name "任务1" --schema-file schema.json --doc-ids "id1,id2"
-python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract_client.py extract --session-id 1 --doc-ids "id1,id2"
+帮我提取这份合同的关键信息：/path/to/合同.pdf
+需要提取：标题、签署日期、金额、甲乙方
 ```
-
-本地调试：`export CLAWSHIRE_API_BASE_URL="http://localhost:8452"`。
 
 ## 项目结构
 
