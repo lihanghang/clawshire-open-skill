@@ -1,14 +1,37 @@
 ---
 name: clawshire-doc-extract-engine
-description: ClawShire 通用文档提取技能 - 用户上传 PDF（单个或多个），通过自然语言设计 Schema、执行结构化提取与多轮迭代修正；对接平台 /api/v1/doc-extract-engine，不依赖公告 met_uuid
+description: 上传任意 PDF（简历/合同/研报/说明书等），用自然语言描述要提取的字段，自动输出结构化 JSON。支持多文档批量提取、多轮迭代修正、Schema 复用。当用户需要：(1) 从 PDF 中提取结构化信息 (2) 把文档内容转成 JSON/表格 (3) 批量解析同类文档并复用字段模板时使用此 Skill。
 ---
 
 # ClawShire 通用文档提取引擎技能
 
-上传自备 PDF → 用自然语言描述要提取的字段 → 拿到结构化 JSON。适用于合同、研报、说明书等任意 PDF。
+上传自备 PDF → 用自然语言描述要提取的字段 → 拿到结构化 JSON。适用于简历、合同、研报、说明书等任意 PDF。
 
 **服务地址：** `https://api.clawshire.cn`
 **前置条件：** 设置 `CLAWSHIRE_API_KEY`，安装 `pip install httpx`。
+
+---
+
+## Agent 调用指引（重要）
+
+**用户只需提供 PDF 路径 + 一句话需求，Agent 自动完成全流程，无需用户手动传递任何 ID。**
+
+典型触发语句：
+- "帮我从这个简历 PDF 提取基本信息、工作经历、技能"
+- "把这份合同里的甲乙方、金额、签署日期提取出来"
+- "解析这个研报，提取公司名称、评级、目标价"
+
+Agent 执行顺序（全自动，中间 ID 不需要用户参与）：
+
+```
+1. upload PDF               → 获得 document_id
+2. schema-create            → 获得 conversation_id
+3. schema-chat "用户需求"   → 获得 schema（504 时自动 fallback 到 schema-get）
+4. session-create           → 获得 session_id
+5. extract --auto-end       → 获得结构化结果 + 自动打印摘要
+```
+
+> **耗时提示：** `schema-chat` 约 30秒～3分钟，`extract` 约 1～5分钟，请告知用户等待。
 
 ---
 
@@ -21,18 +44,16 @@ SCRIPT="python skills/clawshire-doc-extract-engine/scripts/clawshire_doc_extract
 # 第一步：上传 PDF，记下返回的 document_id
 $SCRIPT upload 合同.pdf
 
-# 第二步：设计提取字段（一句话描述即可，需要 30秒～3分钟）
+# 第二步：设计提取字段（一句话描述即可，遇到 504 会自动拉取服务端结果）
 $SCRIPT schema-create --doc-ids <document_id>
 $SCRIPT schema-chat <conversation_id> "提取甲方、乙方、合同金额、签署日期" --save-as 合同
 
-# 第三步：创建 Session 并提取，结果写入文件（需要 1～5分钟）
+# 第三步：创建 Session 并提取（完成后自动打印覆盖率摘要）
 $SCRIPT session-create --name "合同提取" --from-lib 合同 --doc-ids <document_id>
-$SCRIPT extract --session-id <session_id> --doc-ids <document_id> --out result.json --auto-end --quiet
+$SCRIPT extract --session-id <session_id> --doc-ids <document_id> --out result.json --auto-end
 ```
 
-> **耗时提示：** `schema-chat` 需要 30秒～3分钟，`extract` 需要 1～5分钟。脚本已内置重试机制，遇到 504 超时会自动重试 2 次。
->
-> `--auto-end` 自动归档并触发平台经验学习；`--quiet` 仅打印字段覆盖率概要，不把完整 JSON 输出到终端。
+> `--auto-end` 自动归档并触发平台经验学习；提取完成后会自动打印字段覆盖率摘要。
 
 ---
 

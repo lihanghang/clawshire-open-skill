@@ -119,8 +119,10 @@ def _extract_fields(result_item: dict) -> dict:
     return {k: v for k, v in result_item.items() if k not in meta_keys}
 
 
-def _print_summary(data: Any) -> None:
-    """打印提取结果的统计概要，避免打印完整大 JSON（节省 Token）。"""
+def _print_summary(data: Any, *, as_result: bool = False) -> None:
+    """打印提取结果的统计概要，避免打印完整大 JSON（节省 Token）。
+    as_result=True 时以 ✅ 结果摘要形式输出（用于 extract 完成后的默认展示）。
+    """
     if not isinstance(data, dict):
         _print_json(data)
         return
@@ -129,8 +131,11 @@ def _print_summary(data: Any) -> None:
     results = data.get("results", [])
     doc_count = len(results)
 
-    print(f"\n  batch_id    : {batch_id}")
-    print(f"  文档数量    : {doc_count}")
+    if as_result:
+        print(f"\n  ✅ 提取完成（batch_id={batch_id}，{doc_count} 份文档）", file=sys.stderr)
+    else:
+        print(f"\n  batch_id    : {batch_id}", file=sys.stderr)
+        print(f"  文档数量    : {doc_count}", file=sys.stderr)
 
     if results:
         # 统计字段覆盖率
@@ -144,28 +149,34 @@ def _print_summary(data: Any) -> None:
                     filled[k] = filled.get(k, 0) + 1
 
         if all_keys:
-            print("  字段覆盖率  :")
-            for k in sorted(all_keys):
-                cnt = filled.get(k, 0)
-                bar = "█" * cnt + "░" * (doc_count - cnt)
-                print(f"    {k:<20} {bar}  {cnt}/{doc_count}")
+            total_fields = len(all_keys)
+            filled_fields = sum(1 for k in all_keys if filled.get(k, 0) > 0)
+            coverage_pct = int(filled_fields / total_fields * 100) if total_fields else 0
+            bar_filled = int(coverage_pct / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+            print(f"  字段覆盖率  : {bar} {coverage_pct}%（{filled_fields}/{total_fields} 字段）", file=sys.stderr)
+            if not as_result:
+                for k in sorted(all_keys):
+                    cnt = filled.get(k, 0)
+                    row_bar = "█" * cnt + "░" * (doc_count - cnt)
+                    print(f"    {k:<20} {row_bar}  {cnt}/{doc_count}", file=sys.stderr)
         else:
-            print("  ⚠ 未识别到提取字段，建议直接用 batch-result 查看完整响应确认字段结构")
+            print("  ⚠ 未识别到提取字段，建议直接用 batch-result 查看完整响应确认字段结构", file=sys.stderr)
 
         # 首条文档预览
         first = results[0]
         doc_id = first.get("document_id", "-")
         extracted = _extract_fields(first)
-        print(f"\n  首文档预览  : (doc={doc_id})")
+        print(f"\n  首文档预览  : (doc={doc_id})", file=sys.stderr)
         if extracted:
             for k, v in list(extracted.items())[:5]:
                 val_str = str(v)[:60] + ("..." if len(str(v)) > 60 else "")
-                print(f"    {k}: {val_str}")
+                print(f"    {k}: {val_str}", file=sys.stderr)
             if len(extracted) > 5:
-                print(f"    ... 共 {len(extracted)} 个字段")
+                print(f"    ... 共 {len(extracted)} 个字段", file=sys.stderr)
         else:
-            print("    (无可识别字段)")
-    print()
+            print("    (无可识别字段)", file=sys.stderr)
+    print(file=sys.stderr)
 
 
 # ──────────────────────────────────────────────
@@ -399,6 +410,24 @@ def cmd_schema_create(args: argparse.Namespace) -> None:
     _print_json(r.json())
 
 
+def _save_schema_to_lib(schema: dict, save_as: str, description: str = "") -> None:
+    """将 schema 保存到本地库，同名已存在时跳过并提示。"""
+    lib = _lib_load()
+    if save_as in lib:
+        existing_at = lib[save_as].get("saved_at", "")[:10]
+        print(f"\n  ⚠ 本地库中已存在 [{save_as}]（保存于 {existing_at}），跳过覆盖。", file=sys.stderr)
+        print(f"    如需更新，请用: schema-lib-save --name {save_as} --file <path>", file=sys.stderr)
+    else:
+        lib[save_as] = {
+            "schema": schema,
+            "description": description,
+            "saved_at": datetime.now().isoformat(),
+        }
+        _lib_save(lib)
+        print(f"\n  schema 已自动保存到本地库 [{save_as}]", file=sys.stderr)
+        print(f"  字段: {_schema_field_preview(schema)}", file=sys.stderr)
+
+
 def cmd_schema_chat(args: argparse.Namespace) -> None:
     cid = int(args.conversation_id)
     print("  ⏳ Schema 设计中，预计需要 30秒～3分钟...", file=sys.stderr)
@@ -410,6 +439,16 @@ def cmd_schema_chat(args: argparse.Namespace) -> None:
                 headers={**headers(), "Content-Type": "application/json"},
                 json={"message": args.message},
             )
+        # 504：服务端可能已完成 schema 生成，fallback 到 schema-get
+        if r.status_code == 504:
+            print("  ⚠ Schema 请求超时（504），服务端可能已完成生成，正在拉取结果...", file=sys.stderr)
+            with httpx.Client(timeout=120.0) as c2:
+                r2 = c2.get(
+                    f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}",
+                    headers=headers(),
+                )
+            r2.raise_for_status()
+            return r2.json()
         if r.status_code >= 400:
             print(r.text, file=sys.stderr)
             sys.exit(1)
@@ -419,22 +458,9 @@ def cmd_schema_chat(args: argparse.Namespace) -> None:
     _print_json(data)
 
     # 自动保存 schema 到本地库（--save-as 指定时）
-    if args.save_as and data.get("schema"):
-        lib = _lib_load()
-        # Fix #5: 检测同名 schema，拒绝静默覆盖
-        if args.save_as in lib:
-            existing_at = lib[args.save_as].get("saved_at", "")[:10]
-            print(f"\n  ⚠ 本地库中已存在 [{args.save_as}]（保存于 {existing_at}），跳过覆盖。", file=sys.stderr)
-            print(f"    如需更新，请用: schema-lib-save --name {args.save_as} --file <path>", file=sys.stderr)
-        else:
-            lib[args.save_as] = {
-                "schema": data["schema"],
-                "description": args.description or "",
-                "saved_at": datetime.now().isoformat(),
-            }
-            _lib_save(lib)
-            print(f"\n  schema 已自动保存到本地库 [{args.save_as}]", file=sys.stderr)
-            print(f"  字段: {_schema_field_preview(data['schema'])}", file=sys.stderr)
+    schema = data.get("schema") or data.get("current_schema")
+    if args.save_as and schema:
+        _save_schema_to_lib(schema, args.save_as, args.description or "")
 
 
 def cmd_schema_get(args: argparse.Namespace) -> None:
@@ -573,6 +599,10 @@ def cmd_extract(args: argparse.Namespace) -> None:
     else:
         _print_json(data)
 
+    # 提取完成后，始终打印人类可读摘要（--quiet 模式下已包含，非 quiet 模式额外输出）
+    if not quiet:
+        _print_summary(data, as_result=True)
+
     # 写入本地缓存（在归档之前，archived=False）
     batch_id = data.get("batch_id")
     if batch_id:
@@ -647,6 +677,7 @@ def cmd_batch_chat(args: argparse.Namespace) -> None:
         _print_summary(data)
     else:
         _print_json(data)
+        _print_summary(data, as_result=True)
 
     if args.out is not None:
         _save_json(data, args.out, label=f"batch{bid}_chat")
