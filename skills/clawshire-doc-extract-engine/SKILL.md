@@ -8,7 +8,7 @@ description: 上传任意 PDF（简历/合同/研报/说明书等），用自然
 上传自备 PDF → 用自然语言描述要提取的字段 → 拿到结构化 JSON。适用于简历、合同、研报、说明书等任意 PDF。
 
 **服务地址：** `https://api.clawshire.cn`
-**前置条件：** 设置 `CLAWSHIRE_API_KEY`，安装 `pip install httpx`。
+**前置条件：** 设置 `CLAWSHIRE_API_KEY`。脚本仅使用 Python 标准库，无需安装任何第三方依赖。
 
 ---
 
@@ -53,7 +53,7 @@ $SCRIPT session-create --name "合同提取" --from-lib 合同 --doc-ids <docume
 $SCRIPT extract --session-id <session_id> --doc-ids <document_id> --out result.json --auto-end
 ```
 
-> `--auto-end` 自动归档并触发平台经验学习；提取完成后会自动打印字段覆盖率摘要。
+> `--auto-end` 自动归档并触发平台经验学习；提取完成后始终输出结构化数据，Claude 可直接读取并展示给用户。
 
 ---
 
@@ -113,13 +113,15 @@ $SCRIPT extract --session-id <session_id> --doc-ids <document_id> --out result.j
 
 ## 高级用法：省 Token & 省额度
 
-### 省 Token 选项
+### 输出行为说明
+
+`extract`、`batch-result`、`batch-chat` 命令**始终**将实际接口响应的结构化数据（`results[].data`）输出到 stdout，让 Claude 和用户都能直接看到提取内容。
 
 | 选项 | 作用 |
 |------|------|
-| `extract --quiet` | 不打印完整 JSON，仅显示字段覆盖率 + 首条预览 |
-| `batch-result --summary` | 同上，查询已有批次时使用 |
-| `batch-chat --quiet` | 修正后不打印完整响应 |
+| `extract --quiet` | 额外打印字段覆盖率概要（进度条） |
+| `batch-result --summary` | 额外打印字段覆盖率，查询已有批次时使用 |
+| `batch-chat --quiet` | 额外打印字段覆盖率概要 |
 
 ### 省额度：本地提取缓存
 
@@ -196,7 +198,7 @@ $SCRIPT schema-lib-delete 名称
 
 **认证**：`Authorization: Bearer $CLAWSHIRE_API_KEY`
 **本地调试**：`export CLAWSHIRE_API_BASE_URL=http://localhost:8452`
-**依赖**：平台需启用 `MEME_PLUGIN_REFLECT_ENGINE_ENABLED`
+**依赖**：脚本无需第三方库，仅用 Python 标准库（urllib、json、argparse 等）；平台需启用 `MEME_PLUGIN_REFLECT_ENGINE_ENABLED`
 **耗时**：`extract` / `schema-chat` / `batch-chat` 可能耗时数分钟，应告知用户等待
 
 **与公告数据的关系**：本技能**不需要** `met_uuid`，适合对用户手头的任意 PDF 做通用提取；若只有公告链接，使用 `clawshire-data-query` 查看已有结构化结果。

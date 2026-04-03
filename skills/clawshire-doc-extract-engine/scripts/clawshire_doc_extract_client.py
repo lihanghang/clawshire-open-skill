@@ -2,7 +2,7 @@
 """
 ClawShire 文档提取引擎 CLI — /api/v1/doc-extract-engine/*
 
-依赖: pip install httpx
+无需安装任何第三方依赖，仅使用 Python 标准库。
 环境: CLAWSHIRE_API_KEY
 可选: CLAWSHIRE_API_BASE_URL（默认 https://api.clawshire.cn）
 
@@ -31,18 +31,20 @@ import hashlib
 import json
 import os
 import sys
+import io
+import uuid
+import email.generator
+import email.mime.multipart
+import email.mime.base
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-try:
-    import httpx
-except ImportError:
-    print("缺少依赖: pip install httpx", file=sys.stderr)
-    sys.exit(1)
+from urllib import request as urlreq
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen, Request
 
 DEFAULT_BASE = "https://api.clawshire.cn"
-TIMEOUT_LONG = 600.0
+TIMEOUT_LONG = 600
 SCHEMA_LIB_PATH = Path.home() / ".clawshire" / "schemas.json"
 CACHE_PATH = Path.home() / ".clawshire" / "cache.json"
 
@@ -63,30 +65,114 @@ def api_key() -> str:
     return k
 
 
-def headers() -> dict[str, str]:
-    return {
+def _headers(extra: dict | None = None) -> dict[str, str]:
+    h = {
         "Authorization": f"Bearer {api_key()}",
         "Accept": "application/json",
     }
+    if extra:
+        h.update(extra)
+    return h
 
 
 def _print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _do_request(req: Request, timeout: int = 120) -> Any:
+    """执行 urllib 请求，返回解析后的 JSON。HTTP 错误时打印响应体并退出。"""
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body) if body.strip() else {}
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        return {"_http_error": e.code, "_body": body, "_status": e.code}
+    except URLError as e:
+        return {"_url_error": str(e)}
+
+
+def _request_json(method: str, url: str, payload: Any = None, timeout: int = 120) -> Any:
+    """发送 JSON 请求，返回响应数据。出错时打印并退出。"""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    req = Request(url, data=data, method=method)
+    for k, v in _headers({"Content-Type": "application/json"} if data else {}).items():
+        req.add_header(k, v)
+    result = _do_request(req, timeout=timeout)
+    _check_error(result)
+    return result
+
+
+def _request_get(url: str, timeout: int = 120) -> Any:
+    req = Request(url, method="GET")
+    for k, v in _headers().items():
+        req.add_header(k, v)
+    result = _do_request(req, timeout=timeout)
+    _check_error(result)
+    return result
+
+
+def _check_error(result: dict, fatal: bool = True) -> bool:
+    """检查响应是否为错误，fatal=True 时打印并退出。"""
+    if not isinstance(result, dict):
+        return False
+    status = result.get("_http_error") or result.get("_status")
+    if status and int(status) >= 400:
+        body = result.get("_body", "")
+        print(f"HTTP {status}: {body}", file=sys.stderr)
+        if fatal:
+            sys.exit(1)
+        return True
+    if "_url_error" in result:
+        print(f"网络错误: {result['_url_error']}", file=sys.stderr)
+        if fatal:
+            sys.exit(1)
+        return True
+    return False
+
+
+def _build_multipart(fields: list[tuple[str, Any]]) -> tuple[bytes, str]:
+    """
+    手动构建 multipart/form-data。
+    fields: [(name, (filename, data, content_type)), ...]
+    返回 (body_bytes, content_type_header)
+    """
+    boundary = uuid.uuid4().hex
+    lines = []
+    for name, value in fields:
+        if isinstance(value, tuple):
+            filename, data, mime = value
+            lines.append(f"--{boundary}".encode())
+            lines.append(
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"'.encode()
+            )
+            lines.append(f"Content-Type: {mime}".encode())
+            lines.append(b"")
+            lines.append(data if isinstance(data, bytes) else data.encode())
+        else:
+            lines.append(f"--{boundary}".encode())
+            lines.append(f'Content-Disposition: form-data; name="{name}"'.encode())
+            lines.append(b"")
+            lines.append(str(value).encode())
+    lines.append(f"--{boundary}--".encode())
+    body = b"\r\n".join(lines)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
 def _retry_request(func, max_retries: int = 2, desc: str = "请求") -> Any:
     """重试机制：处理 504 等超时错误"""
     for attempt in range(max_retries + 1):
         try:
-            return func()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 504 and attempt < max_retries:
+            result = func()
+            status = result.get("_http_error") or result.get("_status") if isinstance(result, dict) else None
+            if status == 504 and attempt < max_retries:
                 print(f"  ⚠ {desc}超时 (504)，{attempt + 1}/{max_retries} 次重试中...", file=sys.stderr)
                 continue
-            raise
-        except httpx.TimeoutException as e:
+            return result
+        except Exception as e:
             if attempt < max_retries:
-                print(f"  ⚠ {desc}超时，{attempt + 1}/{max_retries} 次重试中...", file=sys.stderr)
+                print(f"  ⚠ {desc}异常: {e}，{attempt + 1}/{max_retries} 次重试中...", file=sys.stderr)
                 continue
             raise
     raise Exception(f"{desc}失败，已重试 {max_retries} 次")
@@ -120,9 +206,7 @@ def _extract_fields(result_item: dict) -> dict:
 
 
 def _print_summary(data: Any, *, as_result: bool = False) -> None:
-    """打印提取结果的统计概要，避免打印完整大 JSON（节省 Token）。
-    as_result=True 时以 ✅ 结果摘要形式输出（用于 extract 完成后的默认展示）。
-    """
+    """打印提取结果的统计概要（输出到 stderr，节省 Token）。"""
     if not isinstance(data, dict):
         _print_json(data)
         return
@@ -132,7 +216,8 @@ def _print_summary(data: Any, *, as_result: bool = False) -> None:
     doc_count = len(results)
 
     if as_result:
-        print(f"\n  ✅ 提取完成（batch_id={batch_id}，{doc_count} 份文档）", file=sys.stderr)
+        print(f"\n  batch_id    : {batch_id}", file=sys.stderr)
+        print(f"  文档数量    : {doc_count}", file=sys.stderr)
     else:
         print(f"\n  batch_id    : {batch_id}", file=sys.stderr)
         print(f"  文档数量    : {doc_count}", file=sys.stderr)
@@ -151,19 +236,15 @@ def _print_summary(data: Any, *, as_result: bool = False) -> None:
         if all_keys:
             total_fields = len(all_keys)
             filled_fields = sum(1 for k in all_keys if filled.get(k, 0) > 0)
-            coverage_pct = int(filled_fields / total_fields * 100) if total_fields else 0
-            bar_filled = int(coverage_pct / 5)
-            bar = "█" * bar_filled + "░" * (20 - bar_filled)
-            print(f"  字段覆盖率  : {bar} {coverage_pct}%（{filled_fields}/{total_fields} 字段）", file=sys.stderr)
-            if not as_result:
-                for k in sorted(all_keys):
-                    cnt = filled.get(k, 0)
-                    row_bar = "█" * cnt + "░" * (doc_count - cnt)
-                    print(f"    {k:<20} {row_bar}  {cnt}/{doc_count}", file=sys.stderr)
+            print(f"  字段覆盖率  :", file=sys.stderr)
+            for k in sorted(all_keys):
+                cnt = filled.get(k, 0)
+                bar = "█" if cnt > 0 else "░"
+                print(f"    {k:<20} {bar}  {cnt}/{doc_count}", file=sys.stderr)
         else:
-            print("  ⚠ 未识别到提取字段，建议直接用 batch-result 查看完整响应确认字段结构", file=sys.stderr)
+            print("  ⚠ 未识别到提取字段，建议直接用 batch-result 查看完整响应", file=sys.stderr)
 
-        # 首条文档预览
+        # 首条文档预览（stderr）
         first = results[0]
         doc_id = first.get("document_id", "-")
         extracted = _extract_fields(first)
@@ -177,6 +258,32 @@ def _print_summary(data: Any, *, as_result: bool = False) -> None:
         else:
             print("    (无可识别字段)", file=sys.stderr)
     print(file=sys.stderr)
+
+
+def _print_extracted_data(data: Any) -> None:
+    """
+    将实际提取结果（results[].data 或 results[].extracted_data）输出到 stdout。
+    让 Claude 和用户都能直接看到结构化内容，而不只是摘要。
+    """
+    if not isinstance(data, dict):
+        _print_json(data)
+        return
+    results = data.get("results", [])
+    if not results:
+        _print_json(data)
+        return
+
+    output = {
+        "batch_id": data.get("batch_id"),
+        "results": [
+            {
+                "document_id": r.get("document_id"),
+                "data": _extract_fields(r),
+            }
+            for r in results
+        ],
+    }
+    _print_json(output)
 
 
 # ──────────────────────────────────────────────
@@ -286,18 +393,13 @@ def cmd_schema_lib_delete(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────
 
 def _env_sig() -> str:
-    """
-    生成环境签名（API Key + BaseURL 的 hash 前缀）。
-    用于缓存键隔离，防止多环境/多 Key 缓存污染。
-    不存储明文 Key。
-    """
+    """生成环境签名（API Key + BaseURL 的 hash 前缀），防止明文 Key 存储。"""
     key = os.environ.get("CLAWSHIRE_API_KEY", "")
     url = os.environ.get("CLAWSHIRE_API_BASE_URL", DEFAULT_BASE)
     return hashlib.md5(f"{url}:{key}".encode()).hexdigest()[:8]
 
 
 def _cache_key(session_id: int | str, doc_ids: list[str]) -> str:
-    """生成缓存键：环境签名 + session_id + 排序后的 doc_ids。"""
     ids_str = ",".join(sorted(doc_ids))
     return f"{_env_sig()}:{session_id}:{ids_str}"
 
@@ -314,13 +416,11 @@ def _cache_save(cache: dict) -> None:
 
 
 def _cache_get(session_id: int | str, doc_ids: list[str]) -> dict | None:
-    """查询缓存，返回 {batch_id, created_at, archived?} 或 None。"""
     cache = _cache_load()
     return cache.get(_cache_key(session_id, doc_ids))
 
 
 def _cache_put(session_id: int | str, doc_ids: list[str], batch_id: int | str) -> None:
-    """写入缓存条目（archived=False）。"""
     cache = _cache_load()
     cache[_cache_key(session_id, doc_ids)] = {
         "batch_id": batch_id,
@@ -334,7 +434,6 @@ def _cache_put(session_id: int | str, doc_ids: list[str], batch_id: int | str) -
 
 
 def _cache_mark_archived(session_id: int | str, doc_ids: list[str]) -> None:
-    """将缓存条目标记为已归档，--use-cache 命中时会给出相应提示。"""
     cache = _cache_load()
     key = _cache_key(session_id, doc_ids)
     if key in cache:
@@ -348,25 +447,25 @@ def _cache_mark_archived(session_id: int | str, doc_ids: list[str]) -> None:
 # ──────────────────────────────────────────────
 
 def cmd_status(_: argparse.Namespace) -> None:
-    with httpx.Client(timeout=60.0) as c:
-        r = c.get(f"{base_url()}/api/v1/doc-extract-engine/status", headers=headers())
-    r.raise_for_status()
-    _print_json(r.json())
+    data = _request_get(f"{base_url()}/api/v1/doc-extract-engine/status", timeout=60)
+    _print_json(data)
 
 
 def _fetch_pdf_from_url(url: str) -> tuple[str, bytes]:
     """下载 URL 指向的 PDF，返回 (文件名, 内容字节)。"""
     print(f"  正在下载: {url}", file=sys.stderr)
-    with httpx.Client(timeout=TIMEOUT_LONG, follow_redirects=True) as c:
-        r = c.get(url)
-    if r.status_code >= 400:
-        print(f"下载失败 [{r.status_code}]: {url}", file=sys.stderr)
+    req = Request(url)
+    try:
+        with urlopen(req, timeout=TIMEOUT_LONG) as resp:
+            content = resp.read()
+    except HTTPError as e:
+        print(f"下载失败 [{e.code}]: {url}", file=sys.stderr)
         sys.exit(1)
     name = url.rstrip("/").split("/")[-1]
     if not name.lower().endswith(".pdf"):
         name = name + ".pdf" if name else "downloaded.pdf"
-    print(f"  已下载: {name} ({len(r.content)} bytes)", file=sys.stderr)
-    return name, r.content
+    print(f"  已下载: {name} ({len(content)} bytes)", file=sys.stderr)
+    return name, content
 
 
 def cmd_upload(args: argparse.Namespace) -> None:
@@ -384,34 +483,32 @@ def cmd_upload(args: argparse.Namespace) -> None:
                 print(f"非 PDF: {p}", file=sys.stderr)
                 sys.exit(1)
             multipart.append(("files", (p.name, p.read_bytes(), "application/pdf")))
-    with httpx.Client(timeout=TIMEOUT_LONG) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/upload",
-            headers=headers(),
-            files=multipart,
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    _print_json(r.json())
+
+    body, content_type = _build_multipart(multipart)
+    req = Request(
+        f"{base_url()}/api/v1/doc-extract-engine/upload",
+        data=body,
+        method="POST",
+    )
+    for k, v in _headers({"Content-Type": content_type}).items():
+        req.add_header(k, v)
+    result = _do_request(req, timeout=TIMEOUT_LONG)
+    _check_error(result)
+    _print_json(result)
 
 
 def cmd_schema_create(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
-    with httpx.Client(timeout=120.0) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/schema-conversations",
-            headers={**headers(), "Content-Type": "application/json"},
-            json={"document_ids": ids},
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    _print_json(r.json())
+    data = _request_json(
+        "POST",
+        f"{base_url()}/api/v1/doc-extract-engine/schema-conversations",
+        {"document_ids": ids},
+        timeout=120,
+    )
+    _print_json(data)
 
 
 def _save_schema_to_lib(schema: dict, save_as: str, description: str = "") -> None:
-    """将 schema 保存到本地库，同名已存在时跳过并提示。"""
     lib = _lib_load()
     if save_as in lib:
         existing_at = lib[save_as].get("saved_at", "")[:10]
@@ -432,32 +529,26 @@ def cmd_schema_chat(args: argparse.Namespace) -> None:
     cid = int(args.conversation_id)
     print("  ⏳ Schema 设计中，预计需要 30秒～3分钟...", file=sys.stderr)
 
-    def _do_request():
-        with httpx.Client(timeout=TIMEOUT_LONG) as c:
-            r = c.post(
-                f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}/chat",
-                headers={**headers(), "Content-Type": "application/json"},
-                json={"message": args.message},
-            )
+    def _do_request_fn():
+        result = _request_json(
+            "POST",
+            f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}/chat",
+            {"message": args.message},
+            timeout=TIMEOUT_LONG,
+        )
         # 504：服务端可能已完成 schema 生成，fallback 到 schema-get
-        if r.status_code == 504:
+        status = result.get("_http_error") or result.get("_status")
+        if status == 504:
             print("  ⚠ Schema 请求超时（504），服务端可能已完成生成，正在拉取结果...", file=sys.stderr)
-            with httpx.Client(timeout=120.0) as c2:
-                r2 = c2.get(
-                    f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}",
-                    headers=headers(),
-                )
-            r2.raise_for_status()
-            return r2.json()
-        if r.status_code >= 400:
-            print(r.text, file=sys.stderr)
-            sys.exit(1)
-        return r.json()
+            return _request_get(
+                f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}",
+                timeout=120,
+            )
+        return result
 
-    data = _retry_request(_do_request, max_retries=2, desc="Schema 设计")
+    data = _retry_request(_do_request_fn, max_retries=2, desc="Schema 设计")
     _print_json(data)
 
-    # 自动保存 schema 到本地库（--save-as 指定时）
     schema = data.get("schema") or data.get("current_schema")
     if args.save_as and schema:
         _save_schema_to_lib(schema, args.save_as, args.description or "")
@@ -465,21 +556,16 @@ def cmd_schema_chat(args: argparse.Namespace) -> None:
 
 def cmd_schema_get(args: argparse.Namespace) -> None:
     cid = int(args.conversation_id)
-    with httpx.Client(timeout=120.0) as c:
-        r = c.get(
-            f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}",
-            headers=headers(),
-        )
-    r.raise_for_status()
-    _print_json(r.json())
+    data = _request_get(
+        f"{base_url()}/api/v1/doc-extract-engine/schema-conversations/{cid}",
+        timeout=120,
+    )
+    _print_json(data)
 
 
 def cmd_session_create(args: argparse.Namespace) -> None:
     ids = [x.strip() for x in args.doc_ids.split(",") if x.strip()]
 
-    # 优先级：--from-lib > --schema-file
-    # 注意：--from-session 已移除，因为后端 API 不支持获取 session 的 schema
-    # 请使用 schema-export 导出后再用 --schema-file 或保存到本地库后用 --from-lib
     if args.from_lib:
         lib = _lib_load()
         if args.from_lib not in lib:
@@ -498,39 +584,31 @@ def cmd_session_create(args: argparse.Namespace) -> None:
         print("需要 --schema-file 或 --from-lib 之一。", file=sys.stderr)
         sys.exit(1)
 
-    body = {
-        "session_name": args.name,
-        "extraction_schema": extraction_schema,
-        "document_ids": ids,
-    }
-    with httpx.Client(timeout=120.0) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/sessions",
-            headers={**headers(), "Content-Type": "application/json"},
-            json=body,
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    _print_json(r.json())
+    data = _request_json(
+        "POST",
+        f"{base_url()}/api/v1/doc-extract-engine/sessions",
+        {
+            "session_name": args.name,
+            "extraction_schema": extraction_schema,
+            "document_ids": ids,
+        },
+        timeout=120,
+    )
+    _print_json(data)
 
 
 def cmd_session_list(_: argparse.Namespace) -> None:
-    with httpx.Client(timeout=120.0) as c:
-        r = c.get(f"{base_url()}/api/v1/doc-extract-engine/sessions", headers=headers())
-    r.raise_for_status()
-    _print_json(r.json())
+    data = _request_get(f"{base_url()}/api/v1/doc-extract-engine/sessions", timeout=120)
+    _print_json(data)
 
 
 def cmd_history(args: argparse.Namespace) -> None:
     sid = int(args.session_id)
-    with httpx.Client(timeout=120.0) as c:
-        r = c.get(
-            f"{base_url()}/api/v1/doc-extract-engine/sessions/{sid}/history",
-            headers=headers(),
-        )
-    r.raise_for_status()
-    _print_json(r.json())
+    data = _request_get(
+        f"{base_url()}/api/v1/doc-extract-engine/sessions/{sid}/history",
+        timeout=120,
+    )
+    _print_json(data)
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
@@ -538,7 +616,6 @@ def cmd_extract(args: argparse.Namespace) -> None:
     session_id = int(args.session_id)
     quiet = getattr(args, "quiet", False)
 
-    # Fix #4 + Fix #2: --use-cache 命中检查
     if args.use_cache:
         hit = _cache_get(session_id, ids)
         if hit:
@@ -554,26 +631,20 @@ def cmd_extract(args: argparse.Namespace) -> None:
                 print(f"  缓存命中: session={session_id} batch_id={batch_id}  (创建于 {created_at})", file=sys.stderr)
                 print("  直接读取已有 batch 结果，不消耗提取额度", file=sys.stderr)
 
-            with httpx.Client(timeout=120.0) as c:
-                r = c.get(
-                    f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}",
-                    headers=headers(),
-                )
-            if r.status_code >= 400:
-                print(f"  拉取缓存结果失败 [{r.status_code}]", file=sys.stderr)
-                print("  缓存条目可能已失效，将重新提取（消耗提取额度）...", file=sys.stderr)
-                # 继续执行真实提取（fall through）
-            else:
-                data = r.json()
+            data = _request_get(
+                f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}",
+                timeout=120,
+            )
+            if not _check_error(data, fatal=False):
+                _print_extracted_data(data)
                 if quiet:
                     _print_summary(data)
-                else:
-                    _print_json(data)
                 if args.out is not None:
                     _save_json(data, args.out, label=f"extract_session{session_id}")
                 return
+            else:
+                print("  缓存条目可能已失效，将重新提取（消耗提取额度）...", file=sys.stderr)
         else:
-            # Fix #4: 明确告知用户缓存未命中，将消耗真实额度
             print("  缓存未命中，将执行真实提取（消耗提取额度）", file=sys.stderr)
             print("  提示: 提取完成后缓存将自动写入，下次可用 --use-cache 命中", file=sys.stderr)
 
@@ -581,74 +652,61 @@ def cmd_extract(args: argparse.Namespace) -> None:
     print("  ⏳ 文档提取中，预计需要 1～5分钟...", file=sys.stderr)
 
     def _do_extract():
-        with httpx.Client(timeout=TIMEOUT_LONG) as c:
-            r = c.post(
-                f"{base_url()}/api/v1/doc-extract-engine/extract",
-                headers={**headers(), "Content-Type": "application/json"},
-                json=body,
-            )
-        if r.status_code >= 400:
-            print(r.text, file=sys.stderr)
-            sys.exit(1)
-        return r.json()
+        return _request_json(
+            "POST",
+            f"{base_url()}/api/v1/doc-extract-engine/extract",
+            body,
+            timeout=TIMEOUT_LONG,
+        )
 
     data = _retry_request(_do_extract, max_retries=2, desc="文档提取")
 
-    if quiet:
-        _print_summary(data)
-    else:
-        _print_json(data)
+    # 始终输出实际接口响应的结构化数据（stdout，供 Claude 和用户阅读）
+    _print_extracted_data(data)
 
-    # 提取完成后，始终打印人类可读摘要（--quiet 模式下已包含，非 quiet 模式额外输出）
-    if not quiet:
-        _print_summary(data, as_result=True)
+    # 打印摘要（stderr，供进度感知）
+    _print_summary(data)
 
-    # 写入本地缓存（在归档之前，archived=False）
+    # 写入本地缓存
     batch_id = data.get("batch_id")
     if batch_id:
         _cache_put(session_id, ids, batch_id)
 
-    # 保存结果到本地
     if args.out is not None:
         _save_json(data, args.out, label=f"extract_session{session_id}")
 
-    # 自动归档，归档成功后标记缓存
+    # 自动归档
     if args.auto_end:
         if batch_id:
-            with httpx.Client(timeout=120.0) as c:
-                re = c.post(
-                    f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}/end",
-                    headers=headers(),
-                )
-            if re.status_code >= 400:
-                print(f"  归档失败: {re.text}", file=sys.stderr)
-            else:
-                # Fix #2: 归档成功后标记缓存，--use-cache 命中时会给出归档提示
+            end_data = _request_json(
+                "POST",
+                f"{base_url()}/api/v1/doc-extract-engine/batches/{batch_id}/end",
+                None,
+                timeout=120,
+            )
+            if not _check_error(end_data, fatal=False):
                 _cache_mark_archived(session_id, ids)
-                end_data = re.json()
                 exp_id = end_data.get("experience_task_id", "")
                 print(f"\n  已自动归档 batch_id={batch_id}", file=sys.stderr)
                 if exp_id:
                     print(f"  experience_task_id={exp_id}（平台将异步学习本次提取经验）", file=sys.stderr)
+            else:
+                print(f"  归档失败", file=sys.stderr)
 
 
 def cmd_batch_result(args: argparse.Namespace) -> None:
     """查询已有批次的提取结果，无需重新提取（不消耗额度）。"""
     bid = int(args.batch_id)
-    with httpx.Client(timeout=120.0) as c:
-        r = c.get(
-            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}",
-            headers=headers(),
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
+    data = _request_get(
+        f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}",
+        timeout=120,
+    )
+
+    # 始终输出实际结构化数据
+    _print_extracted_data(data)
 
     if getattr(args, "summary", False):
         _print_summary(data)
-    else:
-        _print_json(data)
 
     if args.out is not None:
         _save_json(data, args.out, label=f"batch{bid}_result")
@@ -660,24 +718,20 @@ def cmd_batch_chat(args: argparse.Namespace) -> None:
     print("  ⏳ 批次修正中，预计需要 30秒～3分钟...", file=sys.stderr)
 
     def _do_chat():
-        with httpx.Client(timeout=TIMEOUT_LONG) as c:
-            r = c.post(
-                f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
-                headers={**headers(), "Content-Type": "application/json"},
-                json={"message": args.message},
-            )
-        if r.status_code >= 400:
-            print(r.text, file=sys.stderr)
-            sys.exit(1)
-        return r.json()
+        return _request_json(
+            "POST",
+            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/chat",
+            {"message": args.message},
+            timeout=TIMEOUT_LONG,
+        )
 
     data = _retry_request(_do_chat, max_retries=2, desc="批次修正")
 
+    # 始终输出实际结构化数据
+    _print_extracted_data(data)
+
     if quiet:
         _print_summary(data)
-    else:
-        _print_json(data)
-        _print_summary(data, as_result=True)
 
     if args.out is not None:
         _save_json(data, args.out, label=f"batch{bid}_chat")
@@ -685,15 +739,12 @@ def cmd_batch_chat(args: argparse.Namespace) -> None:
 
 def cmd_batch_end(args: argparse.Namespace) -> None:
     bid = int(args.batch_id)
-    with httpx.Client(timeout=120.0) as c:
-        r = c.post(
-            f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/end",
-            headers=headers(),
-        )
-    if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
+    data = _request_json(
+        "POST",
+        f"{base_url()}/api/v1/doc-extract-engine/batches/{bid}/end",
+        None,
+        timeout=120,
+    )
     _print_json(data)
     exp_id = data.get("experience_task_id", "")
     if exp_id:
@@ -706,7 +757,7 @@ def cmd_batch_end(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="ClawShire 文档提取引擎 CLI")
+    p = argparse.ArgumentParser(description="ClawShire 文档提取引擎 CLI（无需第三方依赖）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("status", help="引擎状态")
@@ -731,7 +782,6 @@ def main() -> None:
     sp.add_argument("conversation_id", help="conversation_id")
     sp.set_defaults(func=cmd_schema_get)
 
-    # 本地 schema 库管理
     sp = sub.add_parser("schema-lib-list", help="列出本地 schema 库（跨 key 复用入口）")
     sp.add_argument("--search", default="", help="关键字模糊过滤（名称或描述）")
     sp.set_defaults(func=cmd_schema_lib_list)
@@ -768,9 +818,9 @@ def main() -> None:
     sp.add_argument("--auto-end", action="store_true",
                     help="提取完自动归档（batch-end），并标记缓存为 archived")
     sp.add_argument("--quiet", action="store_true",
-                    help="仅打印字段覆盖率概要，不输出完整 JSON（配合 --out 节省 Token）")
+                    help="额外打印字段覆盖率概要（默认始终输出结构化数据）")
     sp.add_argument("--use-cache", action="store_true",
-                    help="优先读取本地缓存（按 API Key+URL+session+docs 隔离）；未命中时明确提示后执行真实提取")
+                    help="优先读取本地缓存；未命中时明确提示后执行真实提取")
     sp.set_defaults(func=cmd_extract)
 
     sp = sub.add_parser("batch-result", help="查询已有批次结果（不重新提取，不消耗额度）")
@@ -778,7 +828,7 @@ def main() -> None:
     sp.add_argument("--out", nargs="?", const="", default=None,
                     help="保存结果 JSON（不指定路径时自动命名）")
     sp.add_argument("--summary", action="store_true",
-                    help="仅显示字段覆盖率和首条预览，不打印完整 JSON（节省 Token）")
+                    help="额外显示字段覆盖率（默认始终输出结构化数据）")
     sp.set_defaults(func=cmd_batch_result)
 
     sp = sub.add_parser("batch-chat", help="批次修正一轮")
@@ -787,7 +837,7 @@ def main() -> None:
     sp.add_argument("--out", nargs="?", const="", default=None,
                     help="保存修正结果 JSON")
     sp.add_argument("--quiet", action="store_true",
-                    help="仅打印字段覆盖率概要，不输出完整 JSON（节省 Token）")
+                    help="额外打印字段覆盖率概要（默认始终输出结构化数据）")
     sp.set_defaults(func=cmd_batch_chat)
 
     sp = sub.add_parser("batch-end", help="结束批次（归档，触发经验学习）")
